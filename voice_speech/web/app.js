@@ -622,15 +622,13 @@ async function connect() {
     micAnalyser.smoothingTimeConstant = 0.65;
     micDataArray = new Uint8Array(micAnalyser.fftSize);
 
-    // Pull graph actively into audio destination via silent sink
-    const micSink = inputAudioCtx.createGain();
-    micSink.gain.value = 0.0;
+    // Keep graph actively processing in worklet via virtual media destination (zero speaker bleed/clicks)
+    const micDummyDest = inputAudioCtx.createMediaStreamDestination();
 
     sourceNode.connect(micAnalyser);
     sourceNode.connect(micNode);
-    micNode.connect(micSink);
-    micAnalyser.connect(micSink);
-    micSink.connect(inputAudioCtx.destination);
+    micNode.connect(micDummyDest);
+    micAnalyser.connect(micDummyDest);
 
     // 3. Setup Output Context (24kHz)
     outputAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
@@ -982,7 +980,7 @@ function updateTraceTelemetry(info) {
 
 
 function handleIncomingAudio(arrayBuffer) {
-  if (!outputAudioCtx || arrayBuffer.byteLength <= 4) return;
+  if (!outputAudioCtx || !masterGainNode || arrayBuffer.byteLength <= 4) return;
 
   const dataView = new DataView(arrayBuffer);
   const chunkEpoch = dataView.getUint32(0, false);
@@ -1000,14 +998,6 @@ function handleIncomingAudio(arrayBuffer) {
     float32Array[i] = int16Array[i] / 32768.0;
   }
 
-  // Smooth Hann window edge taper (first & last 24 samples ~ 1ms) to eliminate DAC DC-offset pops/beeps
-  const fadeSamples = Math.min(24, Math.floor(float32Array.length / 2));
-  for (let i = 0; i < fadeSamples; i++) {
-    const taper = 0.5 * (1 - Math.cos((Math.PI * i) / fadeSamples));
-    float32Array[i] *= taper;
-    float32Array[float32Array.length - 1 - i] *= taper;
-  }
-
   const audioBuffer = outputAudioCtx.createBuffer(1, float32Array.length, 24000);
   audioBuffer.copyToChannel(float32Array, 0);
 
@@ -1016,9 +1006,17 @@ function handleIncomingAudio(arrayBuffer) {
   source.connect(masterGainNode);
 
   const now = outputAudioCtx.currentTime;
-  const startTime = Math.max(now, nextPlayTime);
-  source.start(startTime);
-  nextPlayTime = startTime + audioBuffer.duration;
+  if (nextPlayTime < now) {
+    nextPlayTime = now + 0.02;
+    try {
+      masterGainNode.gain.cancelScheduledValues(now);
+      masterGainNode.gain.setValueAtTime(0.001, now);
+      masterGainNode.gain.exponentialRampToValueAtTime(0.85, now + 0.015);
+    } catch (e) {}
+  }
+
+  source.start(nextPlayTime);
+  nextPlayTime += audioBuffer.duration;
 
   activeSources.push(source);
   source.onended = () => {
@@ -1028,13 +1026,32 @@ function handleIncomingAudio(arrayBuffer) {
 }
 
 function stopAllAudio() {
-  for (const src of activeSources) {
+  if (outputAudioCtx && masterGainNode) {
+    const now = outputAudioCtx.currentTime;
     try {
-      src.stop();
-      src.disconnect();
+      masterGainNode.gain.cancelScheduledValues(now);
+      masterGainNode.gain.setTargetAtTime(0.0001, now, 0.005);
     } catch (e) {}
   }
+
+  const sourcesToStop = [...activeSources];
   activeSources = [];
+
+  setTimeout(() => {
+    for (const src of sourcesToStop) {
+      try {
+        src.stop();
+        src.disconnect();
+      } catch (e) {}
+    }
+    if (outputAudioCtx && masterGainNode) {
+      try {
+        masterGainNode.gain.cancelScheduledValues(outputAudioCtx.currentTime);
+        masterGainNode.gain.setValueAtTime(0.85, outputAudioCtx.currentTime);
+      } catch (e) {}
+    }
+  }, 25);
+
   if (outputAudioCtx) {
     nextPlayTime = outputAudioCtx.currentTime;
   }

@@ -31,58 +31,8 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
   };
 
   const toggleMicListening = () => {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      // Fall back to Gemini Live WebSocket session if browser Web Speech API is not available
-      onToggleVoiceSession();
-      return;
-    }
-
-    if (isRecognizing) {
-      if (recognitionRef.current) {
-        recognitionRef.current.stop();
-      }
-      setIsRecognizing(false);
-      return;
-    }
-
-    try {
-      const recognition = new SpeechRecognition();
-      recognition.continuous = false;
-      recognition.interimResults = true;
-      recognition.lang = 'en-US';
-
-      recognition.onstart = () => {
-        setIsRecognizing(true);
-      };
-
-      recognition.onresult = (event: any) => {
-        let transcript = '';
-        for (let i = 0; i < event.results.length; i++) {
-          transcript += event.results[i][0].transcript;
-        }
-        setInputQuery(transcript);
-      };
-
-      recognition.onend = () => {
-        setIsRecognizing(false);
-        if (inputQuery.trim()) {
-          onSubmitQuery(inputQuery.trim(), enableGrounding);
-        }
-      };
-
-      recognition.onerror = (err: any) => {
-        console.warn('Speech recognition error:', err);
-        setIsRecognizing(false);
-      };
-
-      recognitionRef.current = recognition;
-      recognition.start();
-    } catch (e) {
-      console.warn('Failed to start speech recognition:', e);
-      setIsRecognizing(false);
-      onToggleVoiceSession();
-    }
+    // Connect directly to Gemini Live Voice session (clean bidirectional audio with zero browser earcon beeps)
+    onToggleVoiceSession();
   };
 
   const isVoiceActive = voiceState !== 'disconnected';

@@ -20,6 +20,8 @@ export class VoiceWebSocketClient {
   private audioContext: AudioContext | null = null;
   private mediaStream: MediaStream | null = null;
   private workletNode: AudioWorkletNode | null = null;
+  private masterGainNode: GainNode | null = null;
+  private dummyDestNode: MediaStreamAudioDestinationNode | null = null;
 
   // Audio Playback Pipeline (24kHz PCM from Gemini Live)
   private outputSampleRate = 24000;
@@ -58,6 +60,11 @@ export class VoiceWebSocketClient {
         await this.audioContext.resume();
       }
 
+      // Master output gain node for smooth audio playback envelopes (prevents DC pops)
+      this.masterGainNode = this.audioContext.createGain();
+      this.masterGainNode.gain.setValueAtTime(1.0, this.audioContext.currentTime);
+      this.masterGainNode.connect(this.audioContext.destination);
+
       // 2. Request Microphone Access
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -81,11 +88,10 @@ export class VoiceWebSocketClient {
         };
 
         sourceNode.connect(this.workletNode);
-        // Connect to muted destination to keep worklet active in all browsers
-        const muteGain = this.audioContext.createGain();
-        muteGain.gain.value = 0;
-        this.workletNode.connect(muteGain);
-        muteGain.connect(this.audioContext.destination);
+        // Connect to a virtual MediaStreamAudioDestinationNode instead of real speakers
+        // to keep the AudioWorklet graph active without routing mic audio or DC-steps to DAC
+        this.dummyDestNode = this.audioContext.createMediaStreamDestination();
+        this.workletNode.connect(this.dummyDestNode);
       } catch (workletErr) {
         console.warn('AudioWorklet load fallback:', workletErr);
       }
@@ -108,15 +114,31 @@ export class VoiceWebSocketClient {
       this.mediaStream = null;
     }
     if (this.workletNode) {
-      this.workletNode.disconnect();
+      try {
+        this.workletNode.disconnect();
+      } catch (e) {}
       this.workletNode = null;
+    }
+    if (this.dummyDestNode) {
+      try {
+        this.dummyDestNode.disconnect();
+      } catch (e) {}
+      this.dummyDestNode = null;
+    }
+    if (this.masterGainNode) {
+      try {
+        this.masterGainNode.disconnect();
+      } catch (e) {}
+      this.masterGainNode = null;
     }
     if (this.audioContext) {
       this.audioContext.close().catch(() => {});
       this.audioContext = null;
     }
     if (this.ws) {
-      this.ws.close();
+      try {
+        this.ws.close();
+      } catch (e) {}
       this.ws = null;
     }
 
@@ -189,14 +211,24 @@ export class VoiceWebSocketClient {
         if (msg.state === 'PLAYING') {
           this.onStateChange('speaking', msg.message || 'Gemini is speaking...');
         } else if (msg.state === 'LISTENING') {
-          this.onStateChange('listening', msg.message || 'Gemini Live Voice Active! Speak freely anytime...');
+          // If speech audio chunks are still scheduled, let playback finish smoothly
+          const remainingMs = this.audioContext ? Math.max(0, (this.nextPlayTime - this.audioContext.currentTime) * 1000) : 0;
+          if (remainingMs > 60) {
+            setTimeout(() => {
+              if (this.isSessionActive && (!this.audioContext || this.audioContext.currentTime >= this.nextPlayTime - 0.05)) {
+                this.onStateChange('listening', msg.message || 'Gemini Live Voice Active! Speak freely anytime...');
+              }
+            }, remainingMs);
+          } else {
+            this.onStateChange('listening', msg.message || 'Gemini Live Voice Active! Speak freely anytime...');
+          }
         } else if (msg.state === 'CONNECTING') {
           this.onStateChange('connecting', msg.message || 'Connecting to Gemini Live...');
         }
         break;
 
       case 'barge_in':
-        // User interrupted model speaking: immediately clear pending audio buffers
+        // User interrupted model speaking: smoothly fade out pending audio buffers
         this.currentEpoch = msg.epoch ?? this.currentEpoch + 1;
         this.clearAudioQueue();
         this.onStateChange('listening', 'Interruption detected! Listening to you...');
@@ -232,7 +264,7 @@ export class VoiceWebSocketClient {
   }
 
   private handleIncomingAudio(arrayBuffer: ArrayBuffer) {
-    if (!this.audioContext || arrayBuffer.byteLength <= 4) return;
+    if (!this.audioContext || !this.masterGainNode || arrayBuffer.byteLength <= 4) return;
 
     const dataView = new DataView(arrayBuffer);
     const packetEpoch = dataView.getUint32(0, false); // 4-byte big endian epoch
@@ -254,24 +286,22 @@ export class VoiceWebSocketClient {
       float32Data[i] = pcmData[i] / 32768.0;
     }
 
-    // Smooth Hann window edge taper (first & last 24 samples ~ 1ms) to eliminate DAC DC-offset pops/beeps
-    const fadeSamples = Math.min(24, Math.floor(float32Data.length / 2));
-    for (let i = 0; i < fadeSamples; i++) {
-      const taper = 0.5 * (1 - Math.cos((Math.PI * i) / fadeSamples));
-      float32Data[i] *= taper;
-      float32Data[float32Data.length - 1 - i] *= taper;
-    }
-
     const audioBuffer = this.audioContext.createBuffer(1, float32Data.length, this.outputSampleRate);
     audioBuffer.getChannelData(0).set(float32Data);
 
     const sourceNode = this.audioContext.createBufferSource();
     sourceNode.buffer = audioBuffer;
-    sourceNode.connect(this.audioContext.destination);
+    sourceNode.connect(this.masterGainNode);
 
     const now = this.audioContext.currentTime;
     if (this.nextPlayTime < now) {
-      this.nextPlayTime = now + 0.02; // Tiny 20ms jitter buffer
+      this.nextPlayTime = now + 0.02; // Small 20ms jitter buffer
+      // Smooth fade-in from silence
+      try {
+        this.masterGainNode.gain.cancelScheduledValues(now);
+        this.masterGainNode.gain.setValueAtTime(0.001, now);
+        this.masterGainNode.gain.exponentialRampToValueAtTime(1.0, now + 0.015);
+      } catch (e) {}
     }
 
     sourceNode.start(this.nextPlayTime);
@@ -287,13 +317,33 @@ export class VoiceWebSocketClient {
   }
 
   private clearAudioQueue() {
-    for (const node of this.activeSourceNodes) {
+    if (this.audioContext && this.masterGainNode) {
+      const now = this.audioContext.currentTime;
       try {
-        node.stop();
-        node.disconnect();
+        this.masterGainNode.gain.cancelScheduledValues(now);
+        this.masterGainNode.gain.setTargetAtTime(0.0001, now, 0.005);
       } catch (e) {}
     }
+
+    const nodesToStop = [...this.activeSourceNodes];
     this.activeSourceNodes = [];
+
+    // Allow 20ms for gain ramp-down to finish before stopping buffer nodes (zero click/pop)
+    setTimeout(() => {
+      for (const node of nodesToStop) {
+        try {
+          node.stop();
+          node.disconnect();
+        } catch (e) {}
+      }
+      if (this.audioContext && this.masterGainNode) {
+        try {
+          this.masterGainNode.gain.cancelScheduledValues(this.audioContext.currentTime);
+          this.masterGainNode.gain.setValueAtTime(1.0, this.audioContext.currentTime);
+        } catch (e) {}
+      }
+    }, 25);
+
     if (this.audioContext) {
       this.nextPlayTime = this.audioContext.currentTime;
     }
