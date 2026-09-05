@@ -20,12 +20,38 @@ logger = logging.getLogger("riva.streaming")
 
 
 async def ws_reader(websocket: WebSocket, state: ConversationState) -> None:
-    """Continuously drains binary PCM16 audio chunks from the client WebSocket into the mic queue."""
+    """Continuously drains binary PCM16 audio chunks or JSON control messages from the client WebSocket into the mic queue."""
     try:
         while state.session_active:
             msg = await websocket.receive()
             if msg.get("type") == "websocket.disconnect":
                 break
+
+            # Handle JSON text messages (e.g. live map viewport bounds and zoom updates)
+            text_data = msg.get("text")
+            if text_data:
+                try:
+                    import json
+                    payload = json.loads(text_data)
+                    if isinstance(payload, dict) and payload.get("type") == "viewport_update":
+                        if "viewport_bbox" in payload:
+                            state.active_viewport_bbox = payload.get("viewport_bbox")
+                        if "zoom" in payload and payload.get("zoom") is not None:
+                            state.active_viewport_zoom = int(payload.get("zoom"))
+                        if payload.get("location_name"):
+                            state.active_location_name = payload.get("location_name")
+                        if payload.get("center_lat") is not None:
+                            state.active_center_lat = float(payload.get("center_lat"))
+                        if payload.get("center_lng") is not None:
+                            state.active_center_lon = float(payload.get("center_lng"))
+                        logger.info(
+                            f"Live voice viewport updated: zoom={state.active_viewport_zoom}, "
+                            f"bbox={state.active_viewport_bbox}, loc='{state.active_location_name}'"
+                        )
+                except Exception as e:
+                    logger.debug(f"Non-JSON or invalid text ws message: {e}")
+                continue
+
             pcm_bytes = msg.get("bytes")
             if not pcm_bytes:
                 continue

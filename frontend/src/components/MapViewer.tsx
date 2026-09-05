@@ -11,7 +11,9 @@ interface MapViewerProps {
   locationName: string;
   onSearchAOI: (bbox: BoundingBox) => void;
   onMapClickLocation?: (lat: number, lng: number) => void;
+  onViewportChange?: (viewportBbox: [number, number, number, number], zoom: number) => void;
   isSearching: boolean;
+  navKey?: number;
 }
 
 export const MapViewer: React.FC<MapViewerProps> = ({
@@ -22,7 +24,9 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   locationName,
   onSearchAOI,
   onMapClickLocation,
+  onViewportChange,
   isSearching,
+  navKey,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -49,23 +53,33 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     // Satellite Imagery Base Layer
     L.tileLayer(
       'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-      { maxZoom: 18 }
+      { maxZoom: 19 }
     ).addTo(map);
 
     // Reference labels layer
     L.tileLayer(
       'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
-      { maxZoom: 18, opacity: 0.8 }
+      { maxZoom: 19, opacity: 0.8 }
     ).addTo(map);
 
-    map.on('moveend', () => {
+    const broadcastBounds = () => {
       const center = map.getCenter();
+      const currentZoom = map.getZoom();
       setCurrentCoords({
         lat: parseFloat(center.lat.toFixed(4)),
         lng: parseFloat(center.lng.toFixed(4)),
-        zoom: map.getZoom(),
+        zoom: currentZoom,
       });
-    });
+      if (onViewportChange) {
+        const bounds = map.getBounds();
+        onViewportChange(
+          [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()],
+          currentZoom
+        );
+      }
+    };
+
+    map.on('moveend zoomend', broadcastBounds);
 
     map.on('click', (e: L.LeafletMouseEvent) => {
       if (onMapClickLocation) {
@@ -74,6 +88,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     });
 
     mapInstanceRef.current = map;
+    broadcastBounds();
 
     const timer = setTimeout(() => {
       map.invalidateSize();
@@ -86,13 +101,25 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     };
   }, []);
 
-  // Fly to location when coordinates change
+  const prevNavKeyRef = useRef<number | undefined>(navKey);
+  const prevCenterRef = useRef<{ lat: number; lng: number }>({ lat: centerLat, lng: centerLng });
+
+  // Fly to location ONLY on explicit navigation triggers (navKey changed)
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map) return;
 
     map.invalidateSize();
-    map.flyTo([centerLat, centerLng], zoom, { duration: 1.5 });
+
+    if (prevNavKeyRef.current !== navKey) {
+      prevNavKeyRef.current = navKey;
+      const targetZoom = Math.min(19, Math.max(2, zoom));
+      const coordsChanged = Math.abs(prevCenterRef.current.lat - centerLat) > 0.0001 || Math.abs(prevCenterRef.current.lng - centerLng) > 0.0001;
+      prevCenterRef.current = { lat: centerLat, lng: centerLng };
+
+      const flyTarget = coordsChanged ? [centerLat, centerLng] as [number, number] : [map.getCenter().lat, map.getCenter().lng] as [number, number];
+      map.flyTo(flyTarget, targetZoom, { duration: 1.0 });
+    }
 
     // Update marker
     if (markerRef.current) {
@@ -101,8 +128,13 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     const marker = L.marker([centerLat, centerLng]).addTo(map);
     marker.bindPopup(`<strong>${locationName}</strong><br/>Sentinel-2 Real-Time AOI`).openPopup();
     markerRef.current = marker;
+  }, [navKey, centerLat, centerLng, zoom, locationName]);
 
-    // Update Bounding Box rectangle if available
+  // Update Bounding Box rectangle if available without moving map camera
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map) return;
+
     if (bbox && bbox.length === 4) {
       const [minLon, minLat, maxLon, maxLat] = bbox;
       const bounds = L.latLngBounds([minLat, minLon], [maxLat, maxLon]);
@@ -121,7 +153,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
 
       bboxLayerRef.current = rect;
     }
-  }, [centerLat, centerLng, zoom, bbox, locationName]);
+  }, [bbox]);
 
   const handleSearchCurrentView = () => {
     const map = mapInstanceRef.current;

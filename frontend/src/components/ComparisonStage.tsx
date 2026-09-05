@@ -55,6 +55,8 @@ interface ComparisonStageProps {
   baselinePeriod?: string;
   baselineTileUrl?: string;
   onSelectBaselineYear?: (year: string) => void;
+  onViewportChange?: (viewportBbox: [number, number, number, number], zoom: number) => void;
+  navKey?: number;
 }
 
 export type MapLayerType =
@@ -196,6 +198,8 @@ export const ComparisonStage: React.FC<ComparisonStageProps> = ({
   baselinePeriod,
   baselineTileUrl,
   onSelectBaselineYear,
+  onViewportChange,
+  navKey,
 }) => {
   const [viewMode, setViewMode] = useState<'side-by-side' | 'slider' | 'diff'>('side-by-side');
   const [sliderPosition, setSliderPosition] = useState<number>(50);
@@ -380,12 +384,27 @@ export const ComparisonStage: React.FC<ComparisonStageProps> = ({
       isSyncingRef.current = false;
     });
 
+    const broadcastViewport = () => {
+      if (onViewportChange && rightMapInstanceRef.current) {
+        const bounds = rightMapInstanceRef.current.getBounds();
+        const currentZoom = rightMapInstanceRef.current.getZoom();
+        onViewportChange(
+          [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()],
+          currentZoom
+        );
+      }
+    };
+
+    mapRight.on('moveend zoomend', broadcastViewport);
+    mapLeft.on('moveend zoomend', broadcastViewport);
+
     const rightPolyGroup = L.layerGroup().addTo(mapRight);
     rightPolygonLayerRef.current = rightPolyGroup;
 
     leftMapInstanceRef.current = mapLeft;
     rightMapInstanceRef.current = mapRight;
     setMapsVersion((v) => v + 1);
+    broadcastViewport();
 
     // Invalidate size on mount and on multi-stage layout updates
     const invalidateMaps = () => {
@@ -466,15 +485,28 @@ export const ComparisonStage: React.FC<ComparisonStageProps> = ({
     rightMapInstanceRef.current.invalidateSize();
   }, [rightLayer]);
 
-  // Update Map Position when coordinates change
+  const prevNavKeyRef = useRef<number | undefined>(navKey);
+  const prevCenterRef = useRef<{ lat: number; lng: number }>({ lat: centerLat, lng: centerLng });
+
+  // Update Map Position ONLY when user explicitly navigates (navKey changed)
   useEffect(() => {
-    if (leftMapInstanceRef.current && rightMapInstanceRef.current) {
-      leftMapInstanceRef.current.setView([centerLat, centerLng], zoom, { animate: true });
-      rightMapInstanceRef.current.setView([centerLat, centerLng], zoom, { animate: true });
+    if (!leftMapInstanceRef.current || !rightMapInstanceRef.current) return;
+
+    if (prevNavKeyRef.current !== navKey) {
+      prevNavKeyRef.current = navKey;
+      const targetZoom = Math.min(19, Math.max(2, zoom));
+      const coordsChanged = Math.abs(prevCenterRef.current.lat - centerLat) > 0.0001 || Math.abs(prevCenterRef.current.lng - centerLng) > 0.0001;
+      prevCenterRef.current = { lat: centerLat, lng: centerLng };
+
+      const leftCenter = leftMapInstanceRef.current.getCenter();
+      const flyTarget = coordsChanged ? [centerLat, centerLng] as [number, number] : [leftCenter.lat, leftCenter.lng] as [number, number];
+
+      leftMapInstanceRef.current.setView(flyTarget, targetZoom, { animate: true });
+      rightMapInstanceRef.current.setView(flyTarget, targetZoom, { animate: true });
       leftMapInstanceRef.current.invalidateSize();
       rightMapInstanceRef.current.invalidateSize();
     }
-  }, [centerLat, centerLng, zoom]);
+  }, [navKey, centerLat, centerLng, zoom]);
 
 
   // Render Deterministic Pixel-Level Georeferenced Raster Heatmap (CVA / SAR Log-Ratio) on Right Map

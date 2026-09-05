@@ -37,6 +37,12 @@ class CosmoClipAgentController:
             "scene_id": request_payload.get("scene_id"),
             "image_data_url": request_payload.get("image_data_url"),
             "bbox": request_payload.get("bbox"),
+            "viewport_bbox": request_payload.get("viewport_bbox"),
+            "viewport_zoom": request_payload.get("viewport_zoom"),
+            "use_viewport_bbox": False,
+            "is_fine_detail": False,
+            "is_submeter_highres": False,
+            "resolution_badge": "Sentinel-2 MSI (10m GSD)",
             "enable_grounding": request_payload.get("enable_grounding", True),
             "enable_voice_response": request_payload.get("enable_voice_response", True),
             "session_id": request_payload.get("session_id", "default_session"),
@@ -71,12 +77,13 @@ class CosmoClipAgentController:
         state = await self._node_compose_response(state)
 
         total_ms = (time.perf_counter() - start_overall) * 1000.0
+        mode_str = "Sub-Meter High-Res Viewport Mode (~0.5m GSD)" if state.get("is_submeter_highres") else "Sentinel-2 + SAR Pixel CVA Mode (10m GSD)"
         state["execution_trace"].append(
             TraceStep(
                 step="workflow_complete",
                 status="ok",
                 latency_ms=round(total_ms, 2),
-                detail=f"Multimodal LangGraph workflow executed in {round(total_ms, 1)}ms (Optical + SAR + Pixel CVA Mode).",
+                detail=f"Multimodal LangGraph workflow executed in {round(total_ms, 1)}ms ({mode_str}).",
                 timestamp=datetime.now(timezone.utc).isoformat()
             )
         )
@@ -88,6 +95,9 @@ class CosmoClipAgentController:
             answer=state.get("final_answer", "Analysis completed."),
             spoken_text=state.get("spoken_text", state.get("final_answer", "")),
             is_comparison=state.get("is_comparison", False),
+            is_submeter_highres=state.get("is_submeter_highres", False),
+            is_new_location_query=state.get("is_new_location_query", False),
+            resolution_badge=state.get("resolution_badge", "Sentinel-2 MSI (10m GSD)"),
             image_url=state.get("image_url"),
             optical_url=state.get("optical_url"),
             sar_url=state.get("sar_url"),
@@ -146,28 +156,46 @@ class CosmoClipAgentController:
     async def _node_interpret_query(self, state: AgentState) -> AgentState:
         t0 = time.perf_counter()
         raw_q = state["question"]
-        intent = QueryInterpreter.interpret(raw_q, location_hint=state.get("location_name"))
+        intent = QueryInterpreter.interpret(
+            raw_q,
+            location_hint=state.get("location_name"),
+            viewport_bbox=state.get("viewport_bbox")
+        )
         
         if intent.get("corrected_question"):
             state["question"] = intent["corrected_question"]
         state["task_type"] = intent["task"]
         state["target_entity"] = intent["target"]
         state["is_comparison"] = intent["is_comparison"]
+        state["is_fine_detail"] = intent.get("is_fine_detail", False)
+        state["use_viewport_bbox"] = intent.get("use_viewport_bbox", False)
+        state["is_new_location_query"] = intent.get("is_new_location_query", False)
         state["location_meta"] = intent["geocoded_location"]
         state["query_intent_meta"] = intent
         state["baseline_year"] = intent.get("baseline_year")
-        state["current_year"] = intent.get("current_year")
-
         loc_name = intent["geocoded_location"]["name"]
-        emit_log("INFO", "LANGGRAPH", f"Node [interpret_query]: Disambiguated '{raw_q[:30]}...' -> '{state['question']}'")
-        emit_log("INFO", "GEOCODER", f"Resolved dynamic coordinates: '{loc_name}' -> {intent['geocoded_location']['lat']:.4f}°N, {intent['geocoded_location']['lon']:.4f}°E")
+
+        if not state.get("is_new_location_query") and (state["use_viewport_bbox"] or (state.get("viewport_zoom") and state.get("viewport_zoom") >= 17) or state.get("is_fine_detail")) and state.get("viewport_bbox"):
+            state["use_viewport_bbox"] = True
+            state["is_submeter_highres"] = True
+            state["query_bbox"] = state["viewport_bbox"]
+            state["query_zoom"] = max(state.get("viewport_zoom") or 18, 18)
+            state["resolution_badge"] = f"Sub-Meter High-Res (~0.5m GSD, Zoom {state['query_zoom']})"
+            emit_log("INFO", "LANGGRAPH", f"Node [interpret_query]: Fine-detail query detected -> Synced to live map viewport at Zoom {state['query_zoom']} (Sub-Meter Mode)")
+        else:
+            state["query_bbox"] = state.get("bbox") or intent["geocoded_location"].get("bbox")
+            state["query_zoom"] = intent["geocoded_location"].get("zoom", 14)
+            emit_log("INFO", "LANGGRAPH", f"Node [interpret_query]: Disambiguated '{raw_q[:30]}...' -> '{state['question']}'")
+            emit_log("INFO", "GEOCODER", f"Resolved dynamic coordinates: '{loc_name}' -> {intent['geocoded_location']['lat']:.4f}°N, {intent['geocoded_location']['lon']:.4f}°E")
+
         latency = (time.perf_counter() - t0) * 1000.0
+        mode_desc = f"Sub-Meter Viewport Synced (Zoom {state['query_zoom']})" if state["use_viewport_bbox"] else f"Geocoded Location '{loc_name}'"
         state["execution_trace"].append(
             TraceStep(
                 step="interpret_query",
                 status="ok",
                 latency_ms=round(latency, 2),
-                detail=f"Task: '{intent['task']}' | Entity: '{intent['target']}' | Geocoded Location: '{loc_name}' ({intent['geocoded_location']['lat']}°N, {intent['geocoded_location']['lon']}°E).",
+                detail=f"Task: '{intent['task']}' | Entity: '{intent['target']}' | Target: {mode_desc}.",
                 timestamp=datetime.now(timezone.utc).isoformat()
             )
         )
@@ -176,25 +204,25 @@ class CosmoClipAgentController:
     async def _node_prepare_realtime_imagery(self, state: AgentState) -> AgentState:
         t0 = time.perf_counter()
         loc_meta = state["location_meta"]
-        lat = loc_meta["lat"]
-        lon = loc_meta["lon"]
-        passed_bbox = state.get("bbox")
-        if passed_bbox and len(passed_bbox) == 4 and abs(passed_bbox[2] - passed_bbox[0]) < 10.0 and abs(passed_bbox[3] - passed_bbox[1]) < 10.0:
-            bbox = passed_bbox
-        else:
-            bbox = loc_meta.get("bbox")
+        bbox = state.get("query_bbox") or loc_meta.get("bbox")
+        zoom = state.get("query_zoom", loc_meta.get("zoom", 14))
         name = loc_meta.get("name", "Target Location")
+        is_fine_detail = state.get("use_viewport_bbox", False) or state.get("is_fine_detail", False)
 
-        emit_log("INFO", "STAC-API", f"Fetching 10m Sentinel-2 MSI L2A scene over {name}...")
+        if is_fine_detail:
+            emit_log("INFO", "SUBMETER-OPTICAL", f"Fetching sub-meter high-resolution optical crop (~0.5m GSD, Zoom {zoom}) over live viewport...")
+        else:
+            emit_log("INFO", "STAC-API", f"Fetching 10m Sentinel-2 MSI L2A scene over {name}...")
         emit_log("INFO", "SAR-RADAR", f"Calibrating Sentinel-1 C-Band GRD (VV/VH dual-polarization)...")
 
-        # Fetch / generate multimodal scene (Sentinel-2 Optical + Sentinel-1 SAR + Esri Wayback Baseline + Fusion)
+        # Fetch / generate multimodal scene (Sub-Meter High-Res / Sentinel-2 Optical + Sentinel-1 SAR + Esri Wayback Baseline + Fusion)
         baseline_year = state.get("baseline_year") or "2020"
         scene = ImageryService.get_multimodal_scene(
             location_name=name,
             bbox=bbox,
-            zoom=loc_meta.get("zoom", 14),
-            baseline_year=baseline_year
+            zoom=zoom,
+            baseline_year=baseline_year,
+            is_fine_detail=is_fine_detail
         )
 
         state["image_url"] = scene["image_url"]
@@ -215,22 +243,28 @@ class CosmoClipAgentController:
             "resolution_m": scene["optical"]["resolution_m"],
             "acquisition_date": scene["optical"]["acquisition_date"]
         }
+        state["is_submeter_highres"] = scene["optical"].get("is_submeter_highres", is_fine_detail)
+        state["resolution_badge"] = "Sub-Meter High-Res (~0.5m GSD, Zoom 18-19)" if state["is_submeter_highres"] else "Sentinel-2 MSI (10m GSD)"
         state["before_image_url"] = scene["before_image_url"]
         state["after_image_url"] = scene["after_image_url"]
         state["baseline_year"] = scene.get("baseline_year", baseline_year)
         state["baseline_period"] = scene.get("baseline_period")
         state["baseline_tile_url"] = scene.get("baseline_tile_url")
 
-        emit_log("SUCCESS", "SENTINEL-2", f"Optical scene acquired (Cloud: {scene['optical']['cloud_coverage_pct']}%, Date: {scene['optical']['acquisition_date']})")
+        if state["is_submeter_highres"]:
+            emit_log("SUCCESS", "SUBMETER-OPTICAL", f"Sub-meter optical crop acquired (~0.5m GSD, Zoom {zoom}, Resolution: High)")
+        else:
+            emit_log("SUCCESS", "SENTINEL-2", f"Optical scene acquired (Cloud: {scene['optical']['cloud_coverage_pct']}%, Date: {scene['optical']['acquisition_date']})")
         emit_log("SUCCESS", "SAR-RADAR", f"SAR calibrated: Mean σ⁰(VV)={scene['sar']['metrics']['mean_vv_db']}dB, Mean σ⁰(VH)={scene['sar']['metrics']['mean_vh_db']}dB, ΔVV=+{scene['sar']['metrics']['temporal_delta_vv_db']}dB")
 
         latency = (time.perf_counter() - t0) * 1000.0
+        sensor_label = f"Sub-Meter Optical Crop ({zoom}x, 0.5m GSD)" if state["is_submeter_highres"] else f"Sentinel-2 MSI (10m GSD, Cloud: {scene['optical']['cloud_coverage_pct']}%)"
         state["execution_trace"].append(
             TraceStep(
                 step="prepare_realtime_imagery",
                 status="ok",
                 latency_ms=round(latency, 2),
-                detail=f"Acquired Sentinel-2 (Cloud: {scene['optical']['cloud_coverage_pct']}%) & Sentinel-1 C-Band SAR GRD (VV: {scene['sar']['metrics']['mean_vv_db']} dB, VH: {scene['sar']['metrics']['mean_vh_db']} dB, ΔVV: +{scene['sar']['metrics']['temporal_delta_vv_db']} dB).",
+                detail=f"Acquired {sensor_label} & Sentinel-1 C-Band SAR GRD (VV: {scene['sar']['metrics']['mean_vv_db']} dB, VH: {scene['sar']['metrics']['mean_vh_db']} dB, ΔVV: +{scene['sar']['metrics']['temporal_delta_vv_db']} dB).",
                 timestamp=datetime.now(timezone.utc).isoformat()
             )
         )
@@ -292,7 +326,8 @@ class CosmoClipAgentController:
 
     async def _node_execute_vqa_specialist(self, state: AgentState) -> AgentState:
         t0 = time.perf_counter()
-        emit_log("INFO", "MISTRAL-AI", f"Invoking Remote Sensing Vision-Language reasoning (Pixtral / Mistral Cloud)...")
+        sensor_badge = state.get("resolution_badge", "Sentinel-2 (10m GSD)")
+        emit_log("INFO", "MISTRAL-AI", f"Invoking Remote Sensing Vision-Language reasoning ({sensor_badge})...")
         res = await self.vqa_specialist.execute({
             "question": state["question"],
             "task_type": state["task_type"],
@@ -303,7 +338,10 @@ class CosmoClipAgentController:
             "sar_metrics": state.get("sar_metrics", {}),
             "optical_metrics": state.get("optical_metrics", {}),
             "cva_metrics": state.get("cva_metrics", {}),
-            "enable_grounding": state["enable_grounding"]
+            "enable_grounding": state["enable_grounding"],
+            "is_submeter_highres": state.get("is_submeter_highres", False),
+            "resolution_badge": state.get("resolution_badge"),
+            "image_url": state.get("image_url")
         })
         emit_log("SUCCESS", "LANGGRAPH", f"VLM reasoning complete: {len(res.get('evidence', []))} grounded evidence contours generated.")
 

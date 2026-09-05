@@ -44,6 +44,8 @@ class SatelliteVQASpecialistTool(BaseTool):
         sar_metrics = inputs.get("sar_metrics", {})
         optical_metrics = inputs.get("optical_metrics", {})
         cva_metrics = inputs.get("cva_metrics", {})
+        is_submeter_highres = inputs.get("is_submeter_highres", False)
+        resolution_badge = inputs.get("resolution_badge", "Sentinel-2 MSI (10m GSD)")
 
         is_comparison = task_type == "change_analysis" or any(w in clean_q for w in ["change", "changes", "compare", "difference", "before vs after", "growth", "expansion", "sar", "radar"])
 
@@ -52,7 +54,7 @@ class SatelliteVQASpecialistTool(BaseTool):
         # 1. Try Gemini Multimodal Analysis
         if self.gemini_client:
             try:
-                emit_log("INFO", "GEMINI-LIVE", f"Dispatching RS-VQA reasoning to Gemini 2.5 Flash for '{location_name}'...")
+                emit_log("INFO", "GEMINI-LIVE", f"Dispatching RS-VQA reasoning to Gemini 2.5 Flash for '{location_name}' ({resolution_badge})...")
                 llm_res = await loop.run_in_executor(
                     None,
                     self._call_gemini_analysis,
@@ -64,7 +66,9 @@ class SatelliteVQASpecialistTool(BaseTool):
                     optical_metrics,
                     cva_metrics,
                     is_comparison,
-                    target_entity
+                    target_entity,
+                    is_submeter_highres,
+                    resolution_badge
                 )
                 if llm_res:
                     emit_log("SUCCESS", "GEMINI-LIVE", f"Gemini 2.5 Flash generated grounded analysis with {len(llm_res.get('evidence', []))} spatial polygons.")
@@ -76,7 +80,7 @@ class SatelliteVQASpecialistTool(BaseTool):
         # 2. Try Mistral AI Specialist Analysis (Pixtral-12B / Nemo)
         if MISTRAL_API_KEY:
             try:
-                emit_log("INFO", "MISTRAL-AI", f"Invoking Mistral AI Pixtral-12B Vision Reasoning for '{location_name}'...")
+                emit_log("INFO", "MISTRAL-AI", f"Invoking Mistral AI Pixtral-12B Vision Reasoning for '{location_name}' ({resolution_badge})...")
                 mistral_res = await loop.run_in_executor(
                     None,
                     self._call_mistral_analysis,
@@ -88,7 +92,9 @@ class SatelliteVQASpecialistTool(BaseTool):
                     optical_metrics,
                     cva_metrics,
                     is_comparison,
-                    target_entity
+                    target_entity,
+                    is_submeter_highres,
+                    resolution_badge
                 )
                 if mistral_res:
                     emit_log("SUCCESS", "MISTRAL-AI", f"Mistral Pixtral-12B completed spatial grounding and synthesis.")
@@ -99,7 +105,17 @@ class SatelliteVQASpecialistTool(BaseTool):
 
         # 3. Dynamic heuristic fallback using live fetched web intelligence and deterministic CVA
         emit_log("INFO", "LANGGRAPH", f"Applying dynamic multi-sensor fusion reasoning for '{location_name}'...")
-        return self._dynamic_fallback_analysis(question, location_name, location_meta, web_intelligence, cva_metrics, is_comparison, target_entity)
+        return self._dynamic_fallback_analysis(
+            question,
+            location_name,
+            location_meta,
+            web_intelligence,
+            cva_metrics,
+            is_comparison,
+            target_entity,
+            is_submeter_highres,
+            resolution_badge
+        )
 
 
     def _call_gemini_analysis(
@@ -112,7 +128,9 @@ class SatelliteVQASpecialistTool(BaseTool):
         optical_metrics: Dict[str, Any],
         cva_metrics: Dict[str, Any],
         is_comparison: bool,
-        target_entity: str
+        target_entity: str,
+        is_submeter_highres: bool = False,
+        resolution_badge: str = "Sentinel-2 MSI (10m GSD)"
     ) -> Optional[Dict[str, Any]]:
         from google.genai import types
 
@@ -136,32 +154,43 @@ class SatelliteVQASpecialistTool(BaseTool):
         cva_peak_mag = cva_metrics.get("peak_magnitude_pct", 86.5)
         cva_hotspot = cva_metrics.get("hotspot_coords", [lat, lon])
 
+        if is_submeter_highres:
+            res_instruction = (
+                "IMAGERY RESOLUTION: SUB-METER HIGH-RESOLUTION OPTICAL VIEWPORT CROP (~0.3-0.5m Ground Sample Distance, Zoom 18-19).\n"
+                "- Individual vehicles (~2m x 4.5m), cars, trucks, lane markings, building boundaries, boats, and ground structures ARE CLEARLY RESOLVED.\n"
+                "- When asked to count cars, vehicles, buildings, or features, analyze the high-res crop directly and provide an exact visual count and spatial description.\n"
+            )
+        else:
+            res_instruction = (
+                "IMAGERY RESOLUTION: Sentinel-2 MSI Level-2A (10m Ground Sample Distance, each pixel is 10m x 10m).\n"
+                "- Individual cars (~2m x 4.5m) and pedestrians are sub-pixel and physically cannot be resolved at 10m GSD without zooming into high-res sub-meter imagery.\n"
+                "- If asked to count individual cars without a high-res viewport crop, scientifically inform the user about the 10m pixel limitation and describe the overall parking/road infrastructure.\n"
+            )
+
         prompt = f"""You are an Earth Observation & Remote Sensing Multimodal Satellite AI specialist.
-Analyze this remote-sensing query by combining Sentinel-2 Optical MSI, Sentinel-1 C-Band SAR Dual-Pol GRD radar data, deterministic pixel Change Vector Analysis (CVA), and live ground-truth news context.
+Analyze this remote-sensing query by combining high-resolution optical imagery, Sentinel-1 C-Band SAR Dual-Pol GRD radar data, deterministic pixel Change Vector Analysis (CVA), and live ground-truth news context.
 
 AOI Location: "{location_name}" (Latitude: {lat:.4f}, Longitude: {lon:.4f})
 User Query: "{question}"
+Active Sensor Mode: {resolution_badge}
+
+{res_instruction}
 
 Deterministic Pixel Change Detection (CVA & SAR Log-Ratio Engine):
 - Measured Area Changed: {cva_area_pct}% of scene
 - Mean Spectral Difference Magnitude: {cva_mean_mag}%
 - Peak Difference Magnitude: {cva_peak_mag}%
 - Primary Hotspot Coordinates: {cva_hotspot[0]:.4f}°N, {cva_hotspot[1]:.4f}°E
-- Note: A georeferenced RGBA raster heatmap has already been rendered mathematically and overlaid in the UI. Your task is to explain the physical and municipal causes behind these measured changes.
 
-Optical Sensor Context (Sentinel-2 MSI Level-2A):
+Optical Sensor Context:
 - Acquisition Date: {s2_date}
 - Cloud Coverage: {cloud_pct}%
-- Resolution: 10m Ground Sample Distance (GSD)
+- Active Layer: {resolution_badge}
 
 Synthetic Aperture Radar (SAR) Context (Sentinel-1 C-Band 5.405 GHz GRD):
 - Polarization: Dual-Pol (VV: Surface/Structural backscatter, VH: Volume/Vegetation scattering)
-- Calibrated Mean σ⁰ (VV): {vv_db} dB
-- Calibrated Mean σ⁰ (VH): {vh_db} dB
-- Polarization Ratio (VV - VH): {ratio} dB
-- Temporal Backscatter Delta (ΔVV): +{delta_vv} dB
-- Temporal Volume Delta (ΔVH): +{delta_vh} dB
-- Orbit / Geometry: Ascending Pass (Incidence Angle: 38.4°)
+- Calibrated Mean σ⁰ (VV): {vv_db} dB | Mean σ⁰ (VH): {vh_db} dB | Ratio: {ratio} dB
+- Temporal Backscatter Delta (ΔVV): +{delta_vv} dB | ΔVH: +{delta_vh} dB
 
 Live Web & News Ground Truth Context:
 - Summary: "{web_summary}"
@@ -266,7 +295,9 @@ Return ONLY valid JSON matching this schema:
         optical_metrics: Dict[str, Any],
         cva_metrics: Dict[str, Any],
         is_comparison: bool,
-        target_entity: str
+        target_entity: str,
+        is_submeter_highres: bool = False,
+        resolution_badge: str = "Sentinel-2 MSI (10m GSD)"
     ) -> Optional[Dict[str, Any]]:
         import urllib.request
         import urllib.parse
@@ -287,21 +318,24 @@ Return ONLY valid JSON matching this schema:
         cva_area_pct = cva_metrics.get("area_changed_pct", 14.8)
         cva_peak_mag = cva_metrics.get("peak_magnitude_pct", 86.5)
 
+        res_guidance = "SUB-METER HIGH-RES OPTICAL (GSD ~0.3-0.5m): Individual cars, lane markings, and building features are resolvable for exact visual counting." if is_submeter_highres else "SENTINEL-2 OPTICAL (10m GSD): Individual vehicles/pedestrians are sub-pixel and cannot be resolved."
+
         prompt = f"""You are an Earth Observation & Remote Sensing Satellite AI Specialist (Mistral Vision & SAR Fusion).
 Analyze this satellite scene query:
 Location: "{location_name}" (Lat: {lat:.4f}, Lon: {lon:.4f})
 Query: "{question}"
+Active Sensor: {resolution_badge} ({res_guidance})
 
 Deterministic Pixel CVA & SAR Engine:
 - Measured Area Changed: {cva_area_pct}%
 - Peak Spectral Difference Magnitude: {cva_peak_mag}%
-- Optical Sentinel-2 MSI: Cloud {cloud_pct}%, 10m GSD
+- Optical Sensor: {resolution_badge} (Cloud: {cloud_pct}%)
 - Synthetic Aperture Radar Sentinel-1 C-Band GRD: σ⁰(VV)={vv_db} dB, σ⁰(VH)={vh_db} dB, VV/VH Ratio={ratio} dB, ΔVV=+{delta_vv} dB, ΔVH=+{delta_vh} dB
 - Live News Ground Truth: {web_summary} | Headlines: {headlines_str}
 
 Return ONLY valid JSON matching this exact structure:
 {{
-  "answer": "Comprehensive remote sensing assessment synthesizing Optical 10m bands, SAR backscatter dynamics, measured CVA change ({cva_area_pct}%), and news context.",
+  "answer": "Comprehensive remote sensing assessment synthesizing {resolution_badge} optical bands, SAR backscatter dynamics, measured CVA change ({cva_area_pct}%), and news context.",
   "spoken_text": "Natural conversational voice response suitable for audio playback.",
   "is_comparison": {str(is_comparison).lower()},
   "change_summary": {{
@@ -394,8 +428,11 @@ Return ONLY valid JSON matching this exact structure:
         web_intelligence: Dict[str, Any],
         cva_metrics: Dict[str, Any],
         is_comparison: bool,
-        target_entity: str
+        target_entity: str,
+        is_submeter_highres: bool = False,
+        resolution_badge: str = "Sentinel-2 MSI (10m GSD)"
     ) -> Dict[str, Any]:
+        clean_q = question.lower().strip()
         web_summary = web_intelligence.get("summary", "")
         headlines = web_intelligence.get("headlines", [])
 

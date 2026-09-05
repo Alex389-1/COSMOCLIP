@@ -62,8 +62,11 @@ export async function submitVQAQuery(payload: {
   location_name?: string;
   image_data_url?: string;
   bbox?: [number, number, number, number];
+  viewport_bbox?: [number, number, number, number];
+  viewport_zoom?: number;
   enable_grounding?: boolean;
   enable_voice_response?: boolean;
+  session_id?: string;
 }): Promise<QueryResponse> {
   const res = await fetch(`${API_BASE}/query`, {
     method: 'POST',

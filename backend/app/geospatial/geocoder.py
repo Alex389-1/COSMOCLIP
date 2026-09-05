@@ -4,8 +4,10 @@ import json
 import logging
 import urllib.request
 import urllib.parse
-from typing import Dict, Any, List, Optional, Tuple
-from backend.app.api.logs import emit_log
+try:
+    from app.api.logs import emit_log
+except ImportError:
+    from backend.app.api.logs import emit_log
 
 logger = logging.getLogger(__name__)
 
@@ -356,3 +358,21 @@ Return ONLY valid JSON matching this schema:
             "bbox": [round(lon - delta, 4), round(lat - delta, 4), round(lon + delta, 4), round(lat + delta, 4)],
             "display_name": name
         }
+
+    @staticmethod
+    def reverse_geocode(lat: float, lon: float) -> Optional[str]:
+        """
+        Dynamically resolves coordinates (lat, lon) to a human-readable place or neighborhood name.
+        """
+        try:
+            url = f"https://nominatim.openstreetmap.org/reverse?lat={lat:.5f}&lon={lon:.5f}&format=json"
+            req = urllib.request.Request(url, headers={"User-Agent": "COSMOCLIP-LiveGeo/3.0 (contact@cosmoclip.ai)"})
+            with urllib.request.urlopen(req, timeout=2.5) as resp:
+                data = json.loads(resp.read().decode())
+                if data and "display_name" in data:
+                    parts = [p.strip() for p in data["display_name"].split(",") if p.strip()]
+                    # Return top 2-3 most distinctive components (e.g. "SoHo, Manhattan, New York")
+                    return ", ".join(parts[:3])
+        except Exception:
+            pass
+        return None

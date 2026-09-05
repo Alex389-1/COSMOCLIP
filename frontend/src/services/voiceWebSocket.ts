@@ -43,8 +43,45 @@ export class VoiceWebSocketClient {
     this.onToolStart = onToolStart;
   }
 
+  private viewportDebounceTimer: any = null;
+
   public isActive(): boolean {
     return this.isSessionActive;
+  }
+
+  public sendViewportContext(
+    viewportBbox?: [number, number, number, number],
+    zoom?: number,
+    locationName?: string,
+    centerLat?: number,
+    centerLng?: number,
+    immediate: boolean = false
+  ) {
+    if (this.viewportDebounceTimer) {
+      clearTimeout(this.viewportDebounceTimer);
+      this.viewportDebounceTimer = null;
+    }
+
+    const transmit = () => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN && this.isSessionActive) {
+        this.ws.send(
+          JSON.stringify({
+            type: 'viewport_update',
+            viewport_bbox: viewportBbox,
+            zoom: zoom,
+            location_name: locationName,
+            center_lat: centerLat,
+            center_lng: centerLng,
+          })
+        );
+      }
+    };
+
+    if (immediate) {
+      transmit();
+    } else {
+      this.viewportDebounceTimer = setTimeout(transmit, 150);
+    }
   }
 
   public async startSession() {

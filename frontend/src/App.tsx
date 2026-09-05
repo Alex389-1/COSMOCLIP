@@ -38,7 +38,10 @@ export const App: React.FC = () => {
     zoom: 3,
   });
   const [currentBbox, setCurrentBbox] = useState<[number, number, number, number]>([-180, -60, 180, 60]);
+  const [currentViewportBounds, setCurrentViewportBounds] = useState<[number, number, number, number] | undefined>(undefined);
+  const [currentViewportZoom, setCurrentViewportZoom] = useState<number | undefined>(undefined);
   const [activeImageUrl, setActiveImageUrl] = useState<string>('');
+  const [navKey, setNavKey] = useState<number>(0);
 
   const voiceClientRef = useRef<VoiceWebSocketClient | null>(null);
 
@@ -59,9 +62,6 @@ export const App: React.FC = () => {
         setIsLoading(true);
         const loc = startEvent.location || startEvent.args?.location || '';
         const q = startEvent.question || startEvent.args?.question || '';
-        if (loc) {
-          setCurrentLocationName(loc);
-        }
         if (q || loc) {
           setActiveQuestion(q || `Show satellite imagery for ${loc}`);
         }
@@ -75,6 +75,19 @@ export const App: React.FC = () => {
     };
   }, []);
 
+  // Broadcast viewport context to Live Voice engine whenever viewport or voice state changes
+  useEffect(() => {
+    if (voiceClientRef.current && voiceClientRef.current.isActive()) {
+      voiceClientRef.current.sendViewportContext(
+        currentViewportBounds,
+        currentViewportZoom,
+        currentLocationName,
+        centerCoords.lat,
+        centerCoords.lng
+      );
+    }
+  }, [currentViewportBounds, currentViewportZoom, currentLocationName, centerCoords, voiceState]);
+
   // Interactive Zoom & Pan State from Voice Tool Commands
   const [stageZoom, setStageZoom] = useState<number>(1);
   const [stagePan, setStagePan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
@@ -83,7 +96,45 @@ export const App: React.FC = () => {
   const handleToolCallEvent = async (event: ToolCallEvent) => {
     // 1. Handle Voice Map Zoom & Pan Tool Calls
     if (event.name === 'zoom_map') {
-      const z = typeof event.args?.zoom_level === 'number' ? event.args.zoom_level : 2.2;
+      const rawZ = event.args?.zoom_level;
+      const action = String(event.args?.action || '').toLowerCase();
+      const targetArea = String(event.args?.target_area || '').toLowerCase();
+      const curZ = currentViewportZoom || centerCoords.zoom || 15;
+      let targetZoom = curZ;
+
+      const isExplicitZoomOut = action.includes('out') || targetArea.includes('out') || (typeof rawZ === 'string' && rawZ.toLowerCase().includes('out')) || (typeof rawZ === 'number' && rawZ < 0);
+      const isMaxZoom = action.includes('max') || (typeof rawZ === 'string' && (rawZ.toLowerCase().includes('max') || rawZ.toLowerCase().includes('full') || rawZ.toLowerCase().includes('most')));
+
+      if (isExplicitZoomOut) {
+        targetZoom = Math.max(2, curZ - 3);
+      } else if (isMaxZoom) {
+        targetZoom = 19;
+      } else if (typeof rawZ === 'number') {
+        if (rawZ >= 13 && rawZ <= 20) {
+          // Explicit Web Mercator high-detail satellite zoom requested (e.g. 14, 16, 17, 18, 19)
+          targetZoom = Math.min(19, Math.round(rawZ));
+        } else {
+          // Any small number (e.g. 1, 2, 3, 4, 5) or relative multiplier: ALWAYS zoom in from current zoom!
+          // Advance by +2 levels towards 19
+          targetZoom = Math.min(19, curZ + 2);
+        }
+      } else if (typeof rawZ === 'string') {
+        const match = rawZ.match(/\d+/);
+        if (match) {
+          const num = Math.round(Number(match[0]));
+          if (num >= 13 && num <= 20) {
+            targetZoom = Math.min(19, num);
+          } else {
+            targetZoom = Math.min(19, curZ + 2);
+          }
+        } else {
+          targetZoom = Math.min(19, curZ + 2);
+        }
+      } else {
+        // No explicit zoom number given, default "zoom in" -> advance by +2 zoom levels up to 19
+        targetZoom = Math.min(19, curZ + 2);
+      }
+
       const target = (event.args?.target_area || '').toLowerCase();
       const panDir = (event.args?.pan_direction || '').toLowerCase();
 
@@ -93,30 +144,24 @@ export const App: React.FC = () => {
       if (panDir.includes('top') || panDir.includes('north') || target.includes('top') || target.includes('north')) py = 80;
       if (panDir.includes('bottom') || panDir.includes('south') || target.includes('bottom') || target.includes('south')) py = -80;
 
-      setStageZoom(z);
+      setStageZoom(2.0);
       setStagePan({ x: px, y: py });
-
-      if (z > 1.0) {
-        setCenterCoords((prev) => ({ ...prev, zoom: Math.min(18, prev.zoom + 2) }));
-      } else {
-        setCenterCoords((prev) => ({ ...prev, zoom: 14 }));
-      }
+      setCenterCoords((prev) => ({ ...prev, zoom: targetZoom }));
+      setNavKey((k) => k + 1);
       return;
     }
 
     const loc = event.args?.location || event.args?.query || '';
     const q = event.args?.question || '';
 
-    // If location is detected in voice arguments, update location state immediately
-    if (loc && typeof loc === 'string' && loc.length > 2 && !event.payload) {
+    // Only geocode if the tool call is explicitly get_location_coordinates
+    if (event.name === 'get_location_coordinates' && loc && typeof loc === 'string' && loc.length > 2 && !event.payload) {
       geocodeLocation(loc).then((geo) => {
         setCurrentLocationName(geo.name);
         setCenterCoords({ lat: geo.lat, lng: geo.lon, zoom: geo.zoom || 14 });
         setCurrentBbox(geo.bbox);
         if (geo.image_url) setActiveImageUrl(geo.image_url);
-        if (event.name === 'compare_satellite_images') {
-          setActiveTab('compare');
-        }
+        setNavKey((k) => k + 1);
       }).catch(() => {});
     }
 
@@ -129,12 +174,15 @@ export const App: React.FC = () => {
       }
       if (p.location_meta) {
         setCurrentLocationName(p.location_meta.name);
-        setCenterCoords({
-          lat: p.location_meta.lat,
-          lng: p.location_meta.lon,
-          zoom: p.location_meta.zoom || 14,
-        });
-        setCurrentBbox(p.location_meta.bbox);
+        if (p.is_new_location_query || centerCoords.lat !== p.location_meta.lat || centerCoords.lng !== p.location_meta.lon) {
+          setCenterCoords({
+            lat: p.location_meta.lat,
+            lng: p.location_meta.lon,
+            zoom: p.location_meta.zoom || 15,
+          });
+          setCurrentBbox(p.location_meta.bbox);
+          setNavKey((k) => k + 1);
+        }
       }
       if (p.image_url) {
         setActiveImageUrl(p.image_url);
@@ -147,7 +195,7 @@ export const App: React.FC = () => {
       return;
     }
 
-    // Fallback if payload is raw tool call: query agent controller directly
+    // Fallback if payload is raw tool call: query agent controller directly with live viewport
     const isCompTool = event.name === 'compare_satellite_images';
     const targetQuery = q || (isCompTool
       ? (loc ? `Compare satellite changes around ${loc} between 2020 and 2026` : 'Compare satellite changes')
@@ -158,18 +206,23 @@ export const App: React.FC = () => {
         question: targetQuery,
         location_name: loc || undefined,
         bbox: currentBbox,
+        viewport_bbox: currentViewportBounds,
+        viewport_zoom: currentViewportZoom,
         enable_grounding: true,
         enable_voice_response: true,
       });
       setQueryResponse(res);
-      if (res.location_meta) {
+      if (res.is_new_location_query && res.location_meta) {
         setCurrentLocationName(res.location_meta.name);
         setCenterCoords({
           lat: res.location_meta.lat,
           lng: res.location_meta.lon,
-          zoom: res.location_meta.zoom || 14,
+          zoom: res.location_meta.zoom || 15,
         });
         setCurrentBbox(res.location_meta.bbox);
+        setNavKey((k) => k + 1);
+      } else if (res.location_meta) {
+        setCurrentLocationName(res.location_meta.name);
       }
       if (res.image_url) {
         setActiveImageUrl(res.image_url);
@@ -209,6 +262,7 @@ export const App: React.FC = () => {
       setCenterCoords({ lat, lng: lon, zoom: 14 });
     } finally {
       setIsSearching(false);
+      setNavKey((k) => k + 1);
     }
     setActiveTab('optical');
     handleSubmitQuery(promptText, true);
@@ -224,6 +278,7 @@ export const App: React.FC = () => {
       setCenterCoords({ lat: geo.lat, lng: geo.lon, zoom: geo.zoom });
       setCurrentBbox(geo.bbox);
       setActiveImageUrl(geo.image_url);
+      setNavKey((k) => k + 1);
       setActiveTab('optical');
     } catch (err: any) {
       setErrorMessage(err.message || 'Location not found');
@@ -295,6 +350,8 @@ export const App: React.FC = () => {
         question,
         image_data_url: uploadedImageUrl || undefined,
         bbox: currentBbox,
+        viewport_bbox: currentViewportBounds,
+        viewport_zoom: currentViewportZoom,
         enable_grounding: enableGrounding,
         enable_voice_response: true,
       });
@@ -303,12 +360,15 @@ export const App: React.FC = () => {
 
       if (res.location_meta) {
         setCurrentLocationName(res.location_meta.name);
-        setCenterCoords({
-          lat: res.location_meta.lat,
-          lng: res.location_meta.lon,
-          zoom: res.location_meta.zoom || 13,
-        });
-        setCurrentBbox(res.location_meta.bbox);
+        if (res.is_new_location_query || centerCoords.lat !== res.location_meta.lat || centerCoords.lng !== res.location_meta.lon) {
+          setCenterCoords({
+            lat: res.location_meta.lat,
+            lng: res.location_meta.lon,
+            zoom: res.location_meta.zoom || 14,
+          });
+          setCurrentBbox(res.location_meta.bbox);
+          setNavKey((k) => k + 1);
+        }
       }
 
       if (res.image_url) {
@@ -383,6 +443,15 @@ export const App: React.FC = () => {
                   ? 'Global Earth Observation Grid'
                   : `Optical Observation Stage (Sentinel-2): ${currentLocationName}`}
               </span>
+              {queryResponse?.resolution_badge && (
+                <span className={`px-2 py-0.5 text-[10px] font-mono rounded-md border ${
+                  queryResponse.is_submeter_highres
+                    ? 'bg-amber-950/80 border-amber-500/40 text-amber-300'
+                    : 'bg-emerald-950/80 border-emerald-500/40 text-emerald-300'
+                }`}>
+                  {queryResponse.resolution_badge}
+                </span>
+              )}
             </div>
 
             {/* First-Class Multi-Modal Sensor Switcher */}
@@ -469,8 +538,13 @@ export const App: React.FC = () => {
                 baselineYear={queryResponse?.baseline_year || '2020'}
                 baselinePeriod={queryResponse?.baseline_period}
                 baselineTileUrl={queryResponse?.baseline_tile_url}
+                navKey={navKey}
                 onSelectBaselineYear={(year: string) => {
                   handleSubmitQuery(`Compare change at ${currentLocationName} between ${year} and 2026`, true);
+                }}
+                onViewportChange={(bounds, zoom) => {
+                  setCurrentViewportBounds(bounds);
+                  setCurrentViewportZoom(zoom);
                 }}
               />
             ) : activeTab === 'global' ? (
@@ -488,8 +562,13 @@ export const App: React.FC = () => {
                   zoom={centerCoords.zoom}
                   bbox={currentBbox}
                   locationName={currentLocationName}
+                  navKey={navKey}
                   onSearchAOI={handleSearchAOI}
                   onMapClickLocation={handleMapClick}
+                  onViewportChange={(bounds, zoom) => {
+                    setCurrentViewportBounds(bounds);
+                    setCurrentViewportZoom(zoom);
+                  }}
                   isSearching={isSearching}
                 />
               </div>
@@ -511,7 +590,12 @@ export const App: React.FC = () => {
                 bbox={currentBbox}
                 locationName={currentLocationName}
                 uploadedImageUrl={uploadedImageUrl}
+                navKey={navKey}
                 onUploadImage={(url) => setUploadedImageUrl(url)}
+                onViewportChange={(bounds, zoom) => {
+                  setCurrentViewportBounds(bounds);
+                  setCurrentViewportZoom(zoom);
+                }}
                 evidence={queryResponse?.evidence || []}
               />
             )}

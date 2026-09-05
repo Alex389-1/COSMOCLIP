@@ -49,7 +49,9 @@ interface ImageStageProps {
   locationName: string;
   uploadedImageUrl: string | null;
   onUploadImage: (dataUrl: string) => void;
+  onViewportChange?: (viewportBbox: [number, number, number, number], zoom: number) => void;
   evidence: EvidenceRegion[];
+  navKey?: number;
 }
 
 export const ImageStage: React.FC<ImageStageProps> = ({
@@ -69,7 +71,9 @@ export const ImageStage: React.FC<ImageStageProps> = ({
   locationName,
   uploadedImageUrl,
   onUploadImage,
+  onViewportChange,
   evidence,
+  navKey,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -80,6 +84,7 @@ export const ImageStage: React.FC<ImageStageProps> = ({
   const [showEvidenceOverlay, setShowEvidenceOverlay] = useState(true);
   const [sarSubLayer, setSarSubLayer] = useState<'dual' | 'vv' | 'vh'>('dual');
   const [stageMode, setStageMode] = useState<'interactive_map' | 'raster_tile'>('interactive_map');
+  const [currentZoomLevel, setCurrentZoomLevel] = useState<number>(zoom);
 
   // Initialize Interactive High-Resolution Satellite Leaflet Map
   useEffect(() => {
@@ -111,7 +116,22 @@ export const ImageStage: React.FC<ImageStageProps> = ({
     const layerGroup = L.layerGroup().addTo(map);
     polygonLayerRef.current = layerGroup;
 
+    const broadcastBounds = () => {
+      const currentZoom = map.getZoom();
+      setCurrentZoomLevel(currentZoom);
+      if (onViewportChange) {
+        const bounds = map.getBounds();
+        onViewportChange(
+          [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()],
+          currentZoom
+        );
+      }
+    };
+
+    map.on('moveend zoomend', broadcastBounds);
+
     mapInstanceRef.current = map;
+    broadcastBounds();
 
     const timer = setTimeout(() => {
       map.invalidateSize();
@@ -124,13 +144,25 @@ export const ImageStage: React.FC<ImageStageProps> = ({
     };
   }, []);
 
-  // Update map center & fly when location coordinates change
+  const prevNavKeyRef = useRef<number | undefined>(navKey);
+  const prevCenterRef = useRef<{ lat: number; lng: number }>({ lat: centerLat, lng: centerLng });
+
+  // Fly to location ONLY on explicit navigation triggers (navKey changed)
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map) return;
 
     map.invalidateSize();
-    map.flyTo([centerLat, centerLng], Math.max(13, zoom), { duration: 1.2 });
+
+    if (prevNavKeyRef.current !== navKey) {
+      prevNavKeyRef.current = navKey;
+      const targetZoom = Math.min(19, Math.max(2, zoom));
+      const coordsChanged = Math.abs(prevCenterRef.current.lat - centerLat) > 0.0001 || Math.abs(prevCenterRef.current.lng - centerLng) > 0.0001;
+      prevCenterRef.current = { lat: centerLat, lng: centerLng };
+
+      const flyTarget = coordsChanged ? [centerLat, centerLng] as [number, number] : [map.getCenter().lat, map.getCenter().lng] as [number, number];
+      map.flyTo(flyTarget, targetZoom, { duration: 1.0 });
+    }
 
     // Marker
     if (markerRef.current) {
@@ -139,55 +171,56 @@ export const ImageStage: React.FC<ImageStageProps> = ({
     const marker = L.marker([centerLat, centerLng]).addTo(map);
     marker.bindPopup(`<strong>${locationName}</strong><br/>Sentinel-2 / SAR Observation Target`).openPopup();
     markerRef.current = marker;
+  }, [navKey, centerLat, centerLng, zoom, locationName]);
 
-    // Render Evidence Polygons & Bounding Boxes
-    if (polygonLayerRef.current) {
-      polygonLayerRef.current.clearLayers();
+  // Update Evidence Polygons & Bounding Boxes without moving the map camera
+  useEffect(() => {
+    if (!polygonLayerRef.current) return;
+    polygonLayerRef.current.clearLayers();
 
-      if (showEvidenceOverlay) {
-        // Draw Bounding Box AOI if provided
-        if (bbox && bbox.length === 4) {
-          const [minLon, minLat, maxLon, maxLat] = bbox;
-          const rect = L.rectangle([[minLat, minLon], [maxLat, maxLon]], {
-            color: '#06b6d4',
-            weight: 2,
-            fillColor: '#06b6d4',
-            fillOpacity: 0.12,
-            dashArray: '3, 3'
-          });
-          polygonLayerRef.current.addLayer(rect);
-        }
-
-        // Draw Grounded Evidence Regions
-        evidence.forEach((ev) => {
-          const strokeColor = ev.color === 'cyan' ? '#06b6d4' : ev.color === 'emerald' ? '#10b981' : '#f59e0b';
-          const fillColor = ev.color === 'cyan' ? 'rgba(6, 182, 212, 0.25)' : ev.color === 'emerald' ? 'rgba(16, 185, 129, 0.25)' : 'rgba(245, 158, 11, 0.28)';
-
-          if (bbox && bbox.length === 4 && ev.polygons && ev.polygons.length > 0) {
-            const [minLon, minLat, maxLon, maxLat] = bbox;
-            const latSpan = maxLat - minLat;
-            const lonSpan = maxLon - minLon;
-
-            ev.polygons.forEach((poly) => {
-              const geoPoints: [number, number][] = poly.map(([nx, ny]) => [
-                minLat + (1.0 - ny) * latSpan,
-                minLon + nx * lonSpan
-              ]);
-              const p = L.polygon(geoPoints, {
-                color: strokeColor,
-                weight: 2,
-                fillColor: fillColor,
-                fillOpacity: 0.35,
-                dashArray: '4, 2'
-              });
-              p.bindTooltip(`<strong>${ev.label}</strong> (${Math.round(ev.confidence * 100)}%)`, { permanent: true, direction: 'top' });
-              polygonLayerRef.current?.addLayer(p);
-            });
-          }
+    if (showEvidenceOverlay) {
+      // Draw Bounding Box AOI if provided
+      if (bbox && bbox.length === 4) {
+        const [minLon, minLat, maxLon, maxLat] = bbox;
+        const rect = L.rectangle([[minLat, minLon], [maxLat, maxLon]], {
+          color: '#06b6d4',
+          weight: 2,
+          fillColor: '#06b6d4',
+          fillOpacity: 0.12,
+          dashArray: '3, 3'
         });
+        polygonLayerRef.current.addLayer(rect);
       }
+
+      // Draw Grounded Evidence Regions
+      evidence.forEach((ev) => {
+        const strokeColor = ev.color === 'cyan' ? '#06b6d4' : ev.color === 'emerald' ? '#10b981' : '#f59e0b';
+        const fillColor = ev.color === 'cyan' ? 'rgba(6, 182, 212, 0.25)' : ev.color === 'emerald' ? 'rgba(16, 185, 129, 0.25)' : 'rgba(245, 158, 11, 0.28)';
+
+        if (bbox && bbox.length === 4 && ev.polygons && ev.polygons.length > 0) {
+          const [minLon, minLat, maxLon, maxLat] = bbox;
+          const latSpan = maxLat - minLat;
+          const lonSpan = maxLon - minLon;
+
+          ev.polygons.forEach((poly) => {
+            const geoPoints: [number, number][] = poly.map(([nx, ny]) => [
+              minLat + (1.0 - ny) * latSpan,
+              minLon + nx * lonSpan
+            ]);
+            const p = L.polygon(geoPoints, {
+              color: strokeColor,
+              weight: 2,
+              fillColor: fillColor,
+              fillOpacity: 0.35,
+              dashArray: '4, 2'
+            });
+            p.bindTooltip(`<strong>${ev.label}</strong> (${Math.round(ev.confidence * 100)}%)`, { permanent: true, direction: 'top' });
+            polygonLayerRef.current?.addLayer(p);
+          });
+        }
+      });
     }
-  }, [centerLat, centerLng, zoom, bbox, locationName, evidence, showEvidenceOverlay]);
+  }, [bbox, evidence, showEvidenceOverlay]);
 
   const handleZoomIn = () => {
     mapInstanceRef.current?.zoomIn();
@@ -261,17 +294,21 @@ export const ImageStage: React.FC<ImageStageProps> = ({
                   ? 'bg-purple-950 text-purple-300 border-purple-700/60'
                   : activeLayer === 'fused'
                   ? 'bg-indigo-950 text-indigo-300 border-indigo-700/60'
+                  : currentZoomLevel >= 17
+                  ? 'bg-emerald-950 text-emerald-300 border-emerald-500/60 font-semibold animate-pulse'
                   : 'bg-cyan-950 text-cyan-300 border-cyan-700/60'
               }`}>
                 {activeLayer === 'sar'
                   ? 'Sentinel-1 C-Band GRD'
                   : activeLayer === 'fused'
                   ? 'Sentinel-2 MSI + Sentinel-1 SAR'
+                  : currentZoomLevel >= 17
+                  ? '⚡ Sub-Meter High-Res Optical (~0.5m GSD)'
                   : 'Sentinel-2 L2A (10m BOA)'}
               </span>
             </div>
             <span className="text-[11px] text-slate-400 font-mono">
-              Coordinates: {centerLat.toFixed(4)}°N, {centerLng.toFixed(4)}°E | Interactive 4K Slippy Canvas
+              Coordinates: {centerLat.toFixed(4)}°N, {centerLng.toFixed(4)}°E | Zoom: {currentZoomLevel} | Interactive 4K Slippy Canvas
             </span>
           </div>
         </div>
@@ -385,11 +422,13 @@ export const ImageStage: React.FC<ImageStageProps> = ({
         <div className="px-4 py-1.5 bg-slate-950/90 border-b border-slate-800 flex items-center justify-between text-[11px] font-mono text-slate-300 flex-wrap gap-2">
           <div className="flex items-center gap-3">
             <span className="text-cyan-300">Cloud Cover: <strong>{opticalMetrics.cloud_coverage_pct}%</strong></span>
-            <span className="text-emerald-300">Resolution: <strong>{opticalMetrics.resolution_m}m GSD</strong></span>
+            <span className={currentZoomLevel >= 17 ? 'text-emerald-400 font-bold' : 'text-emerald-300'}>
+              Resolution: <strong>{currentZoomLevel >= 17 ? '~0.3 - 0.5m GSD (Sub-Meter Native)' : `${opticalMetrics.resolution_m}m GSD`}</strong>
+            </span>
             <span className="text-slate-400">Acquisition: <strong>{opticalMetrics.acquisition_date}</strong></span>
           </div>
           <div className="text-slate-400 text-[10px]">
-            10-Band Multispectral Surface Reflectance (BOA)
+            {currentZoomLevel >= 17 ? 'High-Resolution Sub-Meter Orthophoto Tile Canvas' : '10-Band Multispectral Surface Reflectance (BOA)'}
           </div>
         </div>
       )}

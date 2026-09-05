@@ -137,18 +137,21 @@ Orchestrated by `CosmoClipAgentController`:
 1. **Dynamic Geocoder (`geocoder.py`)**:
    - Zero hardcoding: dynamically queries OpenStreetMap Nominatim, Photon Komoot, and Open-Meteo Elevation API.
    - Applies phonetic and acoustic vowel permutations to prevent speech-recognition misspellings.
-2. **Sentinel-2 Multispectral Engine (`sentinel2_service.py`)**:
-   - 10-meter Ground Sample Distance (GSD) Level-2A Bottom-Of-Atmosphere (BOA) reflectance scenes.
-   - Calculates NDVI (Normalized Difference Vegetation Index) and NDWI (Normalized Difference Water Index).
-3. **Sentinel-1 C-Band SAR Radar Engine (`sar_service.py`)**:
+2. **Sentinel-2 & Sub-Meter Optical Engines (`sentinel2_service.py`)**:
+   - **Sentinel-2 MSI Level-2A (Macro Mode, 10m GSD)**: Bottom-Of-Atmosphere reflectance scenes for regional environmental, agricultural, and urban expansion queries. Calculates NDVI and NDWI.
+   - **Esri Sub-Meter High-Resolution Viewport Crop (Fine-Detail Mode, ~0.3-0.5m GSD)**: Stitches native Zoom 18-19 tiles precisely cropped to the active Leaflet map's live bounding box (`viewport_bbox`). Resolves individual vehicles (~2m × 4.5m), lane markings, boats, and building structures for accurate object counting and ground feature analysis.
+3. **Live Viewport Synchronization Engine**:
+   - Leaflet maps (`ComparisonStage.tsx` and `MapViewer.tsx`) track user pan and zoom states on `moveend`/`zoomend`, broadcasting live `[west, south, east, north]` bounds.
+   - `QueryInterpreter` detects fine-detail keywords (`"count"`, `"how many"`, `"here"`, `"in view"`, `"cars"`, `"vehicles"`) and dynamically routes the VLM to sub-meter high-res crops, preventing AI hallucinations caused by sub-pixel Sentinel-2 10m pixels.
+4. **Sentinel-1 C-Band SAR Radar Engine (`sar_service.py`)**:
    - Dual-Polarization Ground Range Detected (GRD): **VV** (surface roughness / building corner reflectors) and **VH** (volume canopy scattering).
    - Radiometric calibration to backscatter coefficient: $\sigma^0_{\text{dB}} = 10 \cdot \log_{10}(\sigma^0)$.
    - Enhanced Lee speckle suppression filter with $7\times7$ spatial damping window.
-4. **Esri Wayback Archive Service (`wayback_service.py`)**:
+5. **Esri Wayback Archive Service (`wayback_service.py`)**:
    - Accesses historical WMTS imagery releases from 2014 to 2026 across 12 distinct curated time periods.
-5. **Cross-Modal Optical-SAR Fusion (`fusion_service.py`)**:
+6. **Cross-Modal Optical-SAR Fusion (`fusion_service.py`)**:
    - Wavelet intensity substitution fusing high-frequency SAR textures into cloud-penetrating multispectral color representations.
-6. **Change Detection & Heatmap Service (`change_detection_service.py`)**:
+7. **Change Detection & Heatmap Service (`change_detection_service.py`)**:
    - Optical Change Vector Analysis: $\text{CVA} = \sqrt{(\Delta R)^2 + (\Delta G)^2 + (\Delta B)^2 + 2.5(\Delta \text{NDVI})^2 + 3.0(\Delta \text{NDWI})^2}$.
    - SAR Log-Ratio Change: $R_{\text{SAR}} = \left| \log_{10}\left( \frac{\sigma^0_{t_2} + \epsilon}{\sigma^0_{t_1} + \epsilon} \right) \right|$.
    - Maps magnitude to a Turbo colormap with smooth alpha blending and georeferences coordinates into Leaflet `L.imageOverlay` bounds.

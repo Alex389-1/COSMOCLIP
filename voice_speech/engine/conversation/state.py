@@ -19,6 +19,11 @@ class ConversationState:
     resumption_handle: Optional[str] = None
     active_image_path: Optional[str] = None
     active_image_id: Optional[str] = None
+    active_viewport_bbox: Optional[list] = None
+    active_viewport_zoom: Optional[int] = None
+    active_location_name: Optional[str] = None
+    active_center_lat: Optional[float] = None
+    active_center_lon: Optional[float] = None
     latest_response: Optional[dict] = None
     mic_queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=30))
     ws_lock: asyncio.Lock = field(default_factory=asyncio.Lock)

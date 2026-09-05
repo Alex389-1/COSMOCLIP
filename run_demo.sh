@@ -51,7 +51,7 @@ fi
 
 # 4. Start FastAPI Backend
 echo "[4/4] Starting FastAPI backend on http://localhost:8000..."
-PYTHONPATH="$SCRIPT_DIR" "$VENV_DIR/bin/uvicorn" backend.app.main:app --host 0.0.0.0 --port 8000 &
+PYTHONPATH="$SCRIPT_DIR" "$VENV_DIR/bin/uvicorn" backend.app.main:app --host 0.0.0.0 --port 8000 --reload &
 BACKEND_PID=$!
 
 # Trap cleanup to cleanly terminate backend on script exit

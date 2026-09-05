@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from typing import Any, Awaitable, Callable, Dict, List, Optional
+import re
 from google.genai import types
 
 
@@ -99,11 +100,11 @@ NEWS_TOOL_DECLARATION = types.FunctionDeclaration(
 ANALYZE_SATELLITE_IMAGE_DECLARATION = types.FunctionDeclaration(
     name="analyze_satellite_image",
     description=(
-        "Analyze a satellite image to answer questions about land cover, water bodies, "
-        "urban structures, ships, vegetation, roads, counting, and spatial terrain features. "
-        "If the user mentions any place name or location (e.g. Tokyo, Paris, Dubai, New York, Delhi, etc.), "
-        "pass it in 'location' to autonomously acquire and analyze a matching Sentinel-2 satellite scene over the internet. "
-        "Always invoke this tool whenever the user asks ANY question about satellite imagery or remote-sensing scenes."
+        "Analyze high-resolution satellite imagery or the user's active map viewport to answer questions about "
+        "cars, vehicles, buildings, roads, ships, vegetation, land cover, object counts, and fine-grained visual details. "
+        "If the user asks whether cars or specific features are visible at their current zoom level or in the scene, "
+        "ALWAYS invoke this tool so the vision model can inspect the exact high-resolution sub-meter satellite crop. "
+        "If the user mentions a specific new location (e.g. Paris, Dubai, New York), pass it in 'location'."
     ),
     parameters=types.Schema(
         type="OBJECT",
@@ -177,16 +178,25 @@ COMPARE_SATELLITE_IMAGES_DECLARATION = types.FunctionDeclaration(
 ZOOM_MAP_DECLARATION = types.FunctionDeclaration(
     name="zoom_map",
     description=(
-        "Zoom into, zoom out of, or focus on a specific sector, building, feature, or area of the satellite map image. "
-        "Invoke this tool whenever the user asks to 'zoom in', 'zoom out', 'zoom into the building/lake/harbor', "
-        "'focus on this area', or 'magnify the map'."
+        "Zoom into, zoom out of, or focus on a specific sector, building, feature, or area of the satellite map image up to maximum zoom level 19. "
+        "Invoke this tool whenever the user asks to 'zoom in', 'zoom out', 'zoom into the building/lake/cars', "
+        "'focus on this area', 'magnify the map', or 'zoom to max/maximum'. "
+        "Standard Web Mercator zoom levels: 14 for city overview, 16 for neighborhood, 18 for street/building detail, and 19 for maximum close-up sub-meter resolution. "
+        "RULES: "
+        "- To 'zoom in' or 'magnify': set action='zoom_in' and/or zoom_level=18 or 19. Do NOT pass numbers below 13 for zoom in. "
+        "- To 'zoom to max': set action='zoom_to_max' and zoom_level=19. "
+        "- To 'zoom out': set action='zoom_out'."
     ),
     parameters=types.Schema(
         type="OBJECT",
         properties={
+            "action": types.Schema(
+                type="STRING",
+                description="Zoom action: 'zoom_in', 'zoom_out', 'zoom_to_max', or 'focus'.",
+            ),
             "zoom_level": types.Schema(
                 type="NUMBER",
-                description="Zoom magnification factor (e.g. 1.5 for slight zoom, 2.0 for 2x, 2.5 for close-up inspection, 1.0 for normal/reset).",
+                description="Target map Web Mercator zoom level (use 18 for street/building level, 19 for maximum close-up sub-meter detail, 14 for city). Do not use numbers below 13 for zoom in. Maximum zoom is 19.",
             ),
             "target_area": types.Schema(
                 type="STRING",
@@ -197,7 +207,6 @@ ZOOM_MAP_DECLARATION = types.FunctionDeclaration(
                 description="Direction to pan (e.g. 'center', 'top-left', 'top-right', 'bottom-left', 'bottom-right', 'north', 'south', 'east', 'west').",
             ),
         },
-        required=["zoom_level"],
     ),
 )
 
@@ -218,13 +227,58 @@ async def _handle_get_latest_news(args: Dict[str, Any], context: Optional[Dict[s
 
 
 async def _handle_zoom_map(args: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> str:
-    zoom_level = float(args.get("zoom_level", 2.0))
-    target_area = str(args.get("target_area", "selected sector")).strip()
-    pan_direction = str(args.get("pan_direction", "center")).strip()
+    args = args or {}
+    raw_zoom = args.get("zoom_level")
+    action = str(args.get("action", "")).lower()
+    target_area = str(args.get("target_area", "current observation view")).strip()
+    from voice_speech.engine.conversation.state import get_or_create_session_state
+    session_id = (context or {}).get("session_id", "default")
+    session_state = get_or_create_session_state(session_id)
+    cur_zoom = session_state.active_viewport_zoom or (context.get("viewport_zoom") if context else 15) or 15
 
-    if zoom_level <= 1.0:
-        return "Reset satellite map zoom to full scene view."
-    return f"Zoomed in to {zoom_level}x magnification focusing on the {target_area}."
+    # Helper to extract numeric zoom level from various inputs
+    def extract_zoom(val: Any) -> Optional[int]:
+        if isinstance(val, (int, float)):
+            return int(val)
+        if isinstance(val, str):
+            lower = val.lower()
+            if any(w in lower for w in ("max", "maximum", "full", "most", "highest", "closest")):
+                return 19
+            if any(w in lower for w in ("min", "minimum")):
+                return 2
+            match = re.search(r"\d+", lower)
+            if match:
+                return int(match.group())
+        return None
+
+    is_zoom_out = (
+        "out" in action or
+        "out" in target_area.lower() or
+        (isinstance(raw_zoom, str) and "out" in raw_zoom.lower()) or
+        (isinstance(raw_zoom, (int, float)) and raw_zoom < 0)
+    )
+
+    if is_zoom_out:
+        target_zoom = max(2, cur_zoom - 3)
+        return f"Zoomed out to wider satellite view of {target_area} (level {target_zoom})."
+
+    is_max = (
+        "max" in action or
+        (isinstance(raw_zoom, str) and any(w in raw_zoom.lower() for w in ("max", "maximum", "full", "most", "highest", "closest")))
+    )
+
+    if is_max:
+        target_zoom = 19
+    else:
+        parsed_zoom = extract_zoom(raw_zoom)
+        if parsed_zoom is not None and parsed_zoom >= 13:
+            target_zoom = min(19, parsed_zoom)
+        else:
+            # Default or small number (1-12) requested for zoom in -> advance by +2 from cur_zoom
+            target_zoom = min(19, cur_zoom + 2)
+
+    return f"Zoomed in to satellite resolution level {target_zoom} (maximum resolution is level 19) on {target_area}."
+
 
 
 async def _handle_get_location_coordinates(args: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> str:
@@ -263,33 +317,46 @@ async def _handle_compare_satellite_images(args: Dict[str, Any], context: Option
     from backend.app.agent.controller import CosmoClipAgentController
 
     args = args or {}
-    location = str(args.get("location", "")).strip()
+    session_id = (context or {}).get("session_id", "default")
+    session_state = get_or_create_session_state(session_id)
+
+    raw_location = args.get("location")
+    has_explicit_loc = bool(raw_location and str(raw_location).strip())
+    location = str(raw_location).strip() if has_explicit_loc else None
+    if not location and session_state.active_location_name and "global" not in session_state.active_location_name.lower():
+        location = session_state.active_location_name
+
     date1 = str(args.get("date1", "2020")).strip()
     date2 = str(args.get("date2", "2026")).strip()
     question = str(args.get("question", "Compare surface features and changes over time")).strip()
-    session_id = (context or {}).get("session_id", "default")
 
     if date1 and date1 not in question and date1 not in ["baseline", "past"]:
-        full_query = f"{question} around {location} between {date1} and {date2 or '2026'}"
+        full_query = f"{question} around {location}" if location else question
     elif location and location.lower() not in question.lower():
         full_query = f"{question} around {location}"
     else:
         full_query = question or (f"Compare satellite changes around {location}" if location else "Compare satellite changes")
 
-    logger.info(f"Bi-temporal change voice tool: full_query='{full_query}', location='{location}', date1='{date1}'")
+    viewport_bbox = None if has_explicit_loc else ((args or {}).get("viewport_bbox") or (context or {}).get("viewport_bbox") or session_state.active_viewport_bbox)
+    viewport_zoom = None if has_explicit_loc else ((args or {}).get("viewport_zoom") or (context or {}).get("viewport_zoom") or session_state.active_viewport_zoom)
+
+    logger.info(
+        f"Bi-temporal change voice tool: full_query='{full_query}', location='{location}', "
+        f"zoom={viewport_zoom}, bbox={viewport_bbox}"
+    )
 
     controller = CosmoClipAgentController()
     response = await controller.run({
         "question": full_query,
         "location_name": location if location else None,
+        "viewport_bbox": viewport_bbox,
+        "viewport_zoom": viewport_zoom,
         "session_id": session_id,
         "enable_grounding": True,
         "enable_voice_response": True,
     })
 
-    session_state = get_or_create_session_state(session_id)
     session_state.latest_response = response.model_dump()
-
     return response.spoken_text or response.answer
 
 
@@ -298,29 +365,43 @@ async def _handle_analyze_satellite_image(args: Dict[str, Any], context: Optiona
     from backend.app.agent.controller import CosmoClipAgentController
 
     args = args or {}
-    question = str(args.get("question", "")).strip()
-    location = str(args.get("location", "")).strip() if args.get("location") else None
     session_id = (context or {}).get("session_id", "default")
+    session_state = get_or_create_session_state(session_id)
 
+    raw_location = args.get("location")
+    has_explicit_loc = bool(raw_location and str(raw_location).strip())
+    location = str(raw_location).strip() if has_explicit_loc else None
+
+    # Fallback to active viewport location only if user didn't specify a new one and not global grid
+    if not location and session_state.active_location_name and "global" not in session_state.active_location_name.lower():
+        location = session_state.active_location_name
+
+    question = str(args.get("question", "")).strip()
     if location and location.lower() not in question.lower():
         full_query = f"{question} around {location}"
     else:
         full_query = question or (f"Satellite scene analysis of {location}" if location else "What do you see in the satellite imagery?")
 
-    logger.info(f"Analyze satellite voice tool: full_query='{full_query}', location='{location}'")
+    viewport_bbox = None if has_explicit_loc else ((args or {}).get("viewport_bbox") or (context or {}).get("viewport_bbox") or session_state.active_viewport_bbox)
+    viewport_zoom = None if has_explicit_loc else ((args or {}).get("viewport_zoom") or (context or {}).get("viewport_zoom") or session_state.active_viewport_zoom)
+
+    logger.info(
+        f"Analyze satellite voice tool: full_query='{full_query}', location='{location}', "
+        f"zoom={viewport_zoom}, bbox={viewport_bbox}"
+    )
 
     controller = CosmoClipAgentController()
     response = await controller.run({
         "question": full_query,
         "location_name": location if location else None,
+        "viewport_bbox": viewport_bbox,
+        "viewport_zoom": viewport_zoom,
         "session_id": session_id,
         "enable_grounding": True,
         "enable_voice_response": True,
     })
 
-    session_state = get_or_create_session_state(session_id)
     session_state.latest_response = response.model_dump()
-
     return response.spoken_text or response.answer
 
 

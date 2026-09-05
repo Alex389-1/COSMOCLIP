@@ -78,6 +78,19 @@ export interface GroundTruthContext {
   retrieval_timestamp?: string;
 }
 
+export interface QueryRequest {
+  question: string;
+  location_name?: string;
+  scene_id?: string;
+  image_data_url?: string;
+  bbox?: [number, number, number, number];
+  viewport_bbox?: [number, number, number, number]; // [west, south, east, north]
+  viewport_zoom?: number;
+  enable_grounding?: boolean;
+  enable_voice_response?: boolean;
+  session_id?: string;
+}
+
 export interface QueryResponse {
   run_id: string;
   task: string;
@@ -85,6 +98,9 @@ export interface QueryResponse {
   answer: string;
   spoken_text: string;
   is_comparison: boolean;
+  is_submeter_highres?: boolean;
+  is_new_location_query?: boolean;
+  resolution_badge?: string;
   image_url?: string;
   optical_url?: string;
   sar_url?: string;

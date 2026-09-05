@@ -23,7 +23,8 @@ class ImageryService:
         location_name: str,
         bbox: Optional[List[float]] = None,
         zoom: int = 14,
-        baseline_year: str = "2020"
+        baseline_year: str = "2020",
+        is_fine_detail: bool = False
     ) -> Dict[str, Any]:
         # 1. Geocode location if bbox not provided
         if not bbox or len(bbox) != 4:
@@ -36,10 +37,13 @@ class ImageryService:
             center_lon = (bbox[0] + bbox[2]) / 2.0
             resolved_name = location_name
 
-        loc_slug = hashlib.md5(f"{center_lat:.4f}_{center_lon:.4f}_{zoom}".encode()).hexdigest()[:10]
+        loc_slug = hashlib.md5(f"{center_lat:.4f}_{center_lon:.4f}_{zoom}_{is_fine_detail}".encode()).hexdigest()[:10]
 
-        # 2. Acquire Current Sentinel-2 Optical MSI (2026)
-        s2_meta = Sentinel2Service.get_sentinel2(bbox=bbox, zoom=zoom)
+        # 2. Acquire Optical Imagery (Sub-Meter High-Res for fine detail queries vs Sentinel-2 MSI for macro)
+        if is_fine_detail:
+            s2_meta = Sentinel2Service.get_esri_highres_crop(bbox=bbox, zoom=max(zoom, 18))
+        else:
+            s2_meta = Sentinel2Service.get_sentinel2(bbox=bbox, zoom=zoom)
         opt_path = s2_meta["image_path"]
 
         # 3. Acquire Genuine Historical Baseline Raster (Esri Wayback WMTS)

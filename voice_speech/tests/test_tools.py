@@ -88,14 +88,27 @@ async def test_dispatch_analyze_satellite_image_unknown_location():
 
 
 @pytest.mark.anyio
-async def test_dispatch_get_location_coordinates():
-    """Test invoking get_location_coordinates tool directly over the internet."""
-    result = await dispatch_tool_call(
-        "get_location_coordinates",
-        {"location": "Mumbai Port"},
-    )
-    assert "Latitude:" in result
-    assert "Longitude:" in result
-    assert "Mumbai" in result
+async def test_dispatch_zoom_map():
+    """Test zoom_map tool handling with various inputs."""
+    # Test zoom to max
+    res_max = await dispatch_tool_call("zoom_map", {"action": "zoom_to_max"})
+    assert "level 19" in res_max
+
+    # Test explicit level 18
+    res_18 = await dispatch_tool_call("zoom_map", {"zoom_level": 18})
+    assert "level 18" in res_18
+
+    # Test small number (e.g. 5) defaults to stepping forward from context/session
+    res_small = await dispatch_tool_call("zoom_map", {"zoom_level": 5}, context={"viewport_zoom": 15})
+    assert "level 17" in res_small
+    assert "level 5" not in res_small
+
+    # Test zoom in action without explicit zoom_level
+    res_in = await dispatch_tool_call("zoom_map", {"action": "zoom_in"}, context={"viewport_zoom": 15})
+    assert "level 17" in res_in
+
+    # Test zoom out
+    res_out = await dispatch_tool_call("zoom_map", {"action": "zoom_out"}, context={"viewport_zoom": 15})
+    assert "level 12" in res_out
 
 

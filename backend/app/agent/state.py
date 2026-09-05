@@ -9,6 +9,14 @@ class AgentState(TypedDict, total=False):
     scene_id: Optional[str]
     image_data_url: Optional[str]
     bbox: Optional[List[float]]
+    viewport_bbox: Optional[List[float]]
+    viewport_zoom: Optional[int]
+    use_viewport_bbox: bool
+    is_fine_detail: bool
+    query_bbox: Optional[List[float]]
+    query_zoom: Optional[int]
+    is_submeter_highres: bool
+    resolution_badge: Optional[str]
     enable_grounding: bool
     enable_voice_response: bool
     session_id: str
