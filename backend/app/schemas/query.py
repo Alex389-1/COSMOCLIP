@@ -1,0 +1,77 @@
+from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field
+
+class TraceStep(BaseModel):
+    step: str = Field(..., description="Name of the execution step")
+    status: str = Field(default="ok", description="Status ('ok', 'warning', 'error', 'skipped')")
+    latency_ms: float = Field(default=0.0, description="Step duration in milliseconds")
+    detail: Optional[str] = Field(None, description="Descriptive diagnostic or parameter information")
+    timestamp: Optional[str] = Field(None, description="ISO timestamp")
+
+class EvidenceRegion(BaseModel):
+    box_2d: Optional[List[float]] = Field(None, description="Normalized coordinates [ymin, xmin, ymax, xmax] (0.0 to 1.0)")
+    geo_bbox: Optional[List[float]] = Field(None, description="Geographic coordinates [min_lon, min_lat, max_lon, max_lat]")
+    polygon: Optional[List[List[float]]] = Field(None, description="Normalized polygon vertices [[x, y], [x, y], ...] (0.0 to 1.0)")
+    polygons: Optional[List[List[List[float]]]] = Field(None, description="Multiple normalized polygons for disjoint buildings or corridors")
+    label: str = Field(..., description="Detected class, grounded phrase, or change descriptor")
+    confidence: float = Field(default=0.85, description="Confidence in this localized evidence")
+    category: Optional[str] = Field(None, description="Change category (e.g. 'road', 'building', 'waterbody', 'forest', 'land')")
+    color: Optional[str] = Field(None, description="High-visibility badge color (e.g. 'amber', 'orange', 'cyan', 'emerald', 'purple')")
+    change_type: Optional[str] = Field(None, description="Type descriptor ('road' | 'building' | 'water' | 'forest' | 'land')")
+
+class ModelMetadata(BaseModel):
+    name: str = Field(default="RS-LLaVA-7B", description="Active model name")
+    version: str = Field(default="v0.1.0", description="Model release version")
+    adapter: Optional[str] = Field(default="RS-VQA-LoRA-Adapters", description="Fine-tuned or PEFT adapter")
+    runtime: str = Field(default="local_gpu / accelerated_engine", description="Inference execution engine")
+
+class ConfidenceInfo(BaseModel):
+    score: float = Field(..., description="System confidence proxy score (0.0 - 1.0)")
+    category: str = Field(default="High", description="'High', 'Moderate', 'Low'")
+    is_calibrated: bool = Field(default=False, description="Flag indicating if statistically calibrated")
+    rationale: str = Field(default="Model heuristic score based on spatial feature density and class certainty")
+
+class QueryRequest(BaseModel):
+    question: str = Field(..., description="Natural language or voice question about the satellite scene / location")
+    scene_id: Optional[str] = Field(None, description="Optional scene identifier")
+    location_name: Optional[str] = Field(None, description="Optional explicit location name")
+    image_data_url: Optional[str] = Field(None, description="Optional base64 data URL for direct image upload")
+    bbox: Optional[List[float]] = Field(None, description="Optional AOI crop coordinates [min_lon, min_lat, max_lon, max_lat]")
+    enable_grounding: bool = Field(default=True, description="Request spatial bounding box / evidence localization")
+    enable_voice_response: bool = Field(default=True, description="Request spoken voice response")
+    session_id: Optional[str] = Field(default="default_session", description="Session identifier")
+
+class QueryResponse(BaseModel):
+    run_id: str = Field(..., description="Unique execution run identifier")
+    task: str = Field(default="vqa", description="Interpreted task type (e.g. 'vqa', 'change_analysis', 'captioning', 'grounding')")
+    target_entity: Optional[str] = Field(None, description="Extracted entity of interest (e.g. 'coastal_change', 'water_body', 'urban')")
+    answer: str = Field(..., description="Detailed natural language response grounded in satellite imagery")
+    spoken_text: str = Field(..., description="Concise, natural speech text for automatic hands-free voice playback")
+    is_comparison: bool = Field(default=False, description="True if query involves change detection or temporal comparison")
+    image_url: Optional[str] = Field(None, description="Single scene visual preview URL")
+    optical_url: Optional[str] = Field(None, description="Sentinel-2 Optical MSI RGB layer URL")
+    sar_url: Optional[str] = Field(None, description="Sentinel-1 SAR Dual-Pol (VV/VH) composite layer URL")
+    sar_vv_url: Optional[str] = Field(None, description="Sentinel-1 SAR VV backscatter layer URL")
+    sar_vh_url: Optional[str] = Field(None, description="Sentinel-1 SAR VH volume scattering layer URL")
+    fused_url: Optional[str] = Field(None, description="Cross-modal Optical + SAR fused layer URL")
+    sar_diff_url: Optional[str] = Field(None, description="Temporal SAR difference layer URL")
+    sar_metrics: Optional[Dict[str, Any]] = Field(None, description="Calibrated SAR backscatter metrics (VV dB, VH dB, ratio, orbit, incidence angle)")
+    optical_metrics: Optional[Dict[str, Any]] = Field(None, description="Optical sensor metrics (cloud cover %, resolution, bands)")
+    before_image_url: Optional[str] = Field(None, description="Historical baseline image URL for comparison slider")
+    after_image_url: Optional[str] = Field(None, description="Current observation image URL for comparison slider")
+    baseline_year: Optional[str] = Field(default="2020", description="Historical baseline year (e.g. '2016', '2018', '2020', '2022', '2024')")
+    baseline_period: Optional[str] = Field(None, description="Release title of historical baseline")
+    baseline_tile_url: Optional[str] = Field(None, description="Direct Leaflet WMTS tile URL template for the baseline release")
+    location_meta: Optional[Dict[str, Any]] = Field(None, description="Geocoded location name, center lat/lon, and bbox")
+    change_summary: Optional[Dict[str, Any]] = Field(None, description="Quantitative change metrics (% area changed, change type)")
+    cva_metrics: Optional[Dict[str, Any]] = Field(None, description="Quantitative Change Vector Analysis & SAR Log-Ratio pixel metrics")
+    heatmap_url: Optional[str] = Field(None, description="Georeferenced RGBA raster heatmap URL from pixel CVA")
+    sar_heatmap_url: Optional[str] = Field(None, description="Georeferenced RGBA raster heatmap URL from SAR log-ratio")
+    heatmap_bounds: Optional[List[List[float]]] = Field(None, description="Leaflet [[min_lat, min_lon], [max_lat, max_lon]] coordinates for L.imageOverlay")
+    ground_truth_context: Optional[Dict[str, Any]] = Field(None, description="Real-world project ground-truth, Google News reports, and municipal facts")
+    confidence: ConfidenceInfo = Field(..., description="Confidence score and proxy analysis")
+    evidence: List[EvidenceRegion] = Field(default_factory=list, description="Spatial evidence or change bounding boxes")
+    scene_id: Optional[str] = Field(None, description="Associated satellite scene identifier")
+    model: ModelMetadata = Field(default_factory=ModelMetadata, description="Model and adapter metadata")
+    trace: List[TraceStep] = Field(default_factory=list, description="Full LangGraph execution trace")
+    audio_base64: Optional[str] = Field(None, description="Optional base64 synthesized audio")

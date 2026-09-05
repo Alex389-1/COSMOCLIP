@@ -1,0 +1,40 @@
+# Virtual Environments
+venv/
+backend/venv/
+.venv/
+env/
+ENV/
+
+# Environment Variables & Secrets
+.env
+.env.local
+.env.*.local
+
+# Node & Frontend Build
+frontend/node_modules/
+node_modules/
+frontend/dist/
+dist/
+.vite/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local Geospatial Cache & Temporary Sessions
+data/cache/*
+!data/cache/.gitkeep
+voice_speech/data/sessions/
+
+# OS & IDE Files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
