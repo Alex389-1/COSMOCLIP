@@ -1,5 +1,5 @@
 import React from 'react';
-import { Volume2, VolumeX, ShieldCheck, GitCompare, Info, CheckCircle2, AlertTriangle, Sparkles, BoxSelect, Activity } from 'lucide-react';
+import { Volume2, VolumeX, ShieldCheck, GitCompare, Info, CheckCircle2, AlertTriangle, Sparkles, BoxSelect, Activity, Camera } from 'lucide-react';
 import { QueryResponse } from '../types';
 
 interface AnswerCardProps {
@@ -82,6 +82,19 @@ export const AnswerCard: React.FC<AnswerCardProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Direct Viewport Screenshot Indicator */}
+      {Boolean(response.query_type === 'current_view' || response.target_entity === 'current_screen_view' || response.resolution_badge?.toLowerCase().includes('screen')) && (
+        <div className="flex items-center justify-between flex-wrap gap-2 px-3 py-1.5 rounded-xl bg-emerald-950/80 border border-emerald-500/50 text-emerald-300 text-xs font-mono shadow-[0_0_12px_rgba(16,185,129,0.2)]">
+          <div className="flex items-center gap-2">
+            <Camera className="w-4 h-4 text-emerald-400 animate-pulse" />
+            <span className="font-semibold">📸 ACTIVE SCREEN VIEWPORT ANALYZED</span>
+          </div>
+          <span className="text-[10px] text-emerald-400/90 font-mono bg-emerald-900/60 px-2 py-0.5 rounded border border-emerald-700/50">
+            Direct VLM Canvas Inspection Verified
+          </span>
+        </div>
+      )}
 
       {/* Primary Answer Output */}
       <div className="text-slate-100 text-sm leading-relaxed font-normal bg-slate-900/70 rounded-xl p-4 border border-slate-800/80 shadow-inner">
@@ -189,6 +202,46 @@ export const AnswerCard: React.FC<AnswerCardProps> = ({
               </span>
             );
           })}
+        </div>
+      )}
+
+      {/* Grounding Badge — shows which area was analyzed and at what resolution */}
+      {response.query_intent && (
+        <div className="flex items-center gap-2 pt-1 border-t border-slate-800/60 flex-wrap">
+          <span className="text-[10px] font-mono text-slate-400 flex items-center gap-1.5">
+            {response.query_intent === 'viewport_bound' && (
+              <span className="flex items-center gap-1 text-cyan-400/80">
+                <span>📍</span>
+                <span>Analyzing current view</span>
+                {response.location_meta?.name && (
+                  <span className="text-slate-500">— {response.location_meta.name}</span>
+                )}
+              </span>
+            )}
+            {response.query_intent === 'navigation' && (
+              <span className="flex items-center gap-1 text-emerald-400/80">
+                <span>🧭</span>
+                <span>Navigated to</span>
+                {response.location_meta?.name && (
+                  <span className="text-slate-300">{response.location_meta.name}</span>
+                )}
+              </span>
+            )}
+            {response.query_intent === 'followup' && (
+              <span className="flex items-center gap-1 text-slate-500">
+                <span>⏪</span>
+                <span>Using previous context</span>
+                {response.location_meta?.name && (
+                  <span>— {response.location_meta.name}</span>
+                )}
+              </span>
+            )}
+          </span>
+          {response.image_gsd_m != null && (
+            <span className="text-[10px] font-mono text-slate-600 bg-slate-900/80 px-1.5 py-0.5 rounded border border-slate-800">
+              {response.image_gsd_m <= 1 ? `${response.image_gsd_m}m GSD · sub-meter` : `${response.image_gsd_m}m GSD`}
+            </span>
+          )}
         </div>
       )}
     </div>

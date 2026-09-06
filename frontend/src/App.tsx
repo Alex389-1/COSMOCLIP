@@ -13,7 +13,8 @@ import { ProcessingHUD } from './components/ProcessingHUD';
 import { QueryResponse, BoundingBox } from './types';
 import { submitVQAQuery, geocodeLocation } from './services/api';
 import { VoiceWebSocketClient, VoiceState, ToolCallEvent, ToolStartEvent } from './services/voiceWebSocket';
-import { Map as MapIcon, Image as ImageIcon, Globe2, Radio, Sparkles, GitCompare, Layers, AlertCircle, RefreshCw, Terminal, GitBranch } from 'lucide-react';
+import { captureCurrentView, fetchUrlAsBase64, isScreenAnalysisQuery } from './utils/captureView';
+import { Map as MapIcon, Image as ImageIcon, Globe2, Radio, Sparkles, GitCompare, Layers, AlertCircle, RefreshCw, Terminal, GitBranch, Camera } from 'lucide-react';
 
 export const App: React.FC = () => {
   const [queryResponse, setQueryResponse] = useState<QueryResponse | null>(null);
@@ -25,6 +26,10 @@ export const App: React.FC = () => {
   const [rightPanelTab, setRightPanelTab] = useState<'trace' | 'logs'>('trace');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null);
+
+  // Screen Capture & Active Viewport Analysis State
+  const [isCurrentViewQuery, setIsCurrentViewQuery] = useState<boolean>(false);
+  const [lastScreenshotSizeKb, setLastScreenshotSizeKb] = useState<number | undefined>(undefined);
 
   // Real-Time Gemini Live Voice State
   const [voiceState, setVoiceState] = useState<VoiceState>('disconnected');
@@ -75,7 +80,7 @@ export const App: React.FC = () => {
     };
   }, []);
 
-  // Broadcast viewport context to Live Voice engine whenever viewport or voice state changes
+  // Broadcast viewport context coordinates to Live Voice engine whenever viewport or voice state changes
   useEffect(() => {
     if (voiceClientRef.current && voiceClientRef.current.isActive()) {
       voiceClientRef.current.sendViewportContext(
@@ -163,6 +168,7 @@ export const App: React.FC = () => {
         if (geo.image_url) setActiveImageUrl(geo.image_url);
         setNavKey((k) => k + 1);
       }).catch(() => {});
+      return;
     }
 
     // If backend provided full structured payload from CosmoClipAgentController
@@ -174,7 +180,8 @@ export const App: React.FC = () => {
       }
       if (p.location_meta) {
         setCurrentLocationName(p.location_meta.name);
-        if (p.is_new_location_query || centerCoords.lat !== p.location_meta.lat || centerCoords.lng !== p.location_meta.lon) {
+        // Only reposition map on explicit navigation intent — same rule as REST path
+        if (p.is_new_location_query && p.location_meta.lat != null) {
           setCenterCoords({
             lat: p.location_meta.lat,
             lng: p.location_meta.lon,
@@ -187,10 +194,12 @@ export const App: React.FC = () => {
       if (p.image_url) {
         setActiveImageUrl(p.image_url);
       }
-      if (p.is_comparison || event.name === 'compare_satellite_images') {
-        setActiveTab('compare');
-      } else {
-        setActiveTab('optical');
+      if (p.is_new_location_query) {
+        if (p.is_comparison || event.name === 'compare_satellite_images') {
+          setActiveTab('compare');
+        } else {
+          setActiveTab('optical');
+        }
       }
       return;
     }
@@ -202,16 +211,34 @@ export const App: React.FC = () => {
       : (loc ? `What are the satellite features around ${loc}?` : 'What are the satellite features?'));
     setActiveQuestion(targetQuery);
     try {
+      let screenshot: string | undefined = undefined;
+      // Only capture screen for visual analysis tools
+      if (event.name === 'analyze_satellite_image' || event.name === 'compare_satellite_images') {
+        try {
+          screenshot = await captureCurrentView();
+          if (screenshot) {
+            const sizeKb = Math.round((screenshot.length * 3) / 4 / 1024);
+            setLastScreenshotSizeKb(sizeKb);
+            setIsCurrentViewQuery(true);
+          }
+        } catch (e) {
+          console.debug('No active map ready for screenshot capture:', e);
+        }
+      }
+
       const res = await submitVQAQuery({
         question: targetQuery,
         location_name: loc || undefined,
+        image_base64: screenshot,
         bbox: currentBbox,
         viewport_bbox: currentViewportBounds,
         viewport_zoom: currentViewportZoom,
+        viewport_captured_at: Date.now(),
         enable_grounding: true,
         enable_voice_response: true,
       });
       setQueryResponse(res);
+      setIsCurrentViewQuery(Boolean(res.query_type === 'current_view' || res.target_entity === 'current_screen_view'));
       if (res.is_new_location_query && res.location_meta) {
         setCurrentLocationName(res.location_meta.name);
         setCenterCoords({
@@ -221,16 +248,18 @@ export const App: React.FC = () => {
         });
         setCurrentBbox(res.location_meta.bbox);
         setNavKey((k) => k + 1);
+
+        // Only default view mode on genuine navigation events
+        if (res.is_comparison || isCompTool) {
+          setActiveTab('compare');
+        } else {
+          setActiveTab('optical');
+        }
       } else if (res.location_meta) {
         setCurrentLocationName(res.location_meta.name);
       }
       if (res.image_url) {
         setActiveImageUrl(res.image_url);
-      }
-      if (res.is_comparison || isCompTool) {
-        setActiveTab('compare');
-      } else {
-        setActiveTab('optical');
       }
     } catch (e) {
       console.error('Error handling voice tool call:', e);
@@ -344,23 +373,60 @@ export const App: React.FC = () => {
     setIsLoading(true);
     setActiveQuestion(question);
     setErrorMessage(null);
+    setIsCurrentViewQuery(false); // Reset until backend confirms
 
     try {
+      let screenshot: string | undefined = undefined;
+      const needsScreenshot = isScreenAnalysisQuery(question);
+
+      if (needsScreenshot) {
+        try {
+          // Primary: tile compositor captures exactly what the user sees at current zoom/pan
+          screenshot = await captureCurrentView();
+          if (screenshot) {
+            const sizeKb = Math.round((screenshot.length * 3) / 4 / 1024);
+            setLastScreenshotSizeKb(sizeKb);
+            setIsCurrentViewQuery(true);
+            console.log('[App] Screen analysis query: tile compositor capture:', sizeKb, 'KB');
+          }
+        } catch (e) {
+          console.debug('Tile compositor capture failed, trying satellite URL fallback:', e);
+          if (activeImageUrl) {
+            try {
+              screenshot = await fetchUrlAsBase64(activeImageUrl);
+              if (screenshot) {
+                const sizeKb = Math.round((screenshot.length * 3) / 4 / 1024);
+                setLastScreenshotSizeKb(sizeKb);
+                setIsCurrentViewQuery(true);
+                console.log('[App] Satellite URL fallback capture:', sizeKb, 'KB');
+              }
+            } catch { /* ignore double-failure */ }
+          }
+        }
+      } else {
+        console.log('[App] Location/navigation query: skipping screen capture for:', question);
+      }
+
       const res = await submitVQAQuery({
         question,
         image_data_url: uploadedImageUrl || undefined,
+        image_base64: screenshot,
         bbox: currentBbox,
         viewport_bbox: currentViewportBounds,
         viewport_zoom: currentViewportZoom,
+        viewport_captured_at: Date.now(),
         enable_grounding: enableGrounding,
         enable_voice_response: true,
       });
 
       setQueryResponse(res);
+      setIsCurrentViewQuery(Boolean(res.query_type === 'current_view' || res.target_entity === 'current_screen_view'));
 
       if (res.location_meta) {
         setCurrentLocationName(res.location_meta.name);
-        if (res.is_new_location_query || centerCoords.lat !== res.location_meta.lat || centerCoords.lng !== res.location_meta.lon) {
+        // Only reposition the map and switch view mode when the backend explicitly signals a navigation intent.
+        // Absence of is_new_location_query — or its being false — means "leave the map camera and active tab alone".
+        if (res.is_new_location_query && res.location_meta.lat != null) {
           setCenterCoords({
             lat: res.location_meta.lat,
             lng: res.location_meta.lon,
@@ -368,17 +434,18 @@ export const App: React.FC = () => {
           });
           setCurrentBbox(res.location_meta.bbox);
           setNavKey((k) => k + 1);
+
+          // Only default view mode on genuine navigation events
+          if (res.is_comparison) {
+            setActiveTab('compare');
+          } else {
+            setActiveTab('optical');
+          }
         }
       }
 
       if (res.image_url) {
         setActiveImageUrl(res.image_url);
-      }
-
-      if (res.is_comparison) {
-        setActiveTab('compare');
-      } else {
-        setActiveTab('optical');
       }
 
       // Auto-narrate synthesized spoken text response
@@ -425,12 +492,14 @@ export const App: React.FC = () => {
           activeQuestion={activeQuestion}
           activeLocationName={currentLocationName}
           isVoiceActive={voiceState !== 'disconnected'}
+          isCurrentView={isCurrentViewQuery}
+          screenshotSizeKb={lastScreenshotSizeKb}
         />
 
         {/* TOP SECTION: Dynamic Multimodal Satellite & Geospatial Stage */}
         <section className="w-full flex flex-col gap-3">
           <div className="flex items-center justify-between flex-wrap gap-2">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <Layers className="w-4 h-4 text-cyan-400" />
               <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
                 {activeTab === 'compare'
@@ -451,6 +520,12 @@ export const App: React.FC = () => {
                 }`}>
                   {queryResponse.resolution_badge}
                 </span>
+              )}
+              {Boolean(isCurrentViewQuery || queryResponse?.query_type === 'current_view') && (
+                <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-emerald-950/90 border border-emerald-500/60 text-emerald-300 text-[11px] font-mono shadow-[0_0_10px_rgba(16,185,129,0.3)] animate-pulse">
+                  <Camera className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>📸 SCREENSHOT USED FOR ANALYSIS {lastScreenshotSizeKb ? `(${lastScreenshotSizeKb} KB)` : ''}</span>
+                </div>
               )}
             </div>
 

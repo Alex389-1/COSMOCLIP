@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import L from 'leaflet';
+import { setActiveMap } from '../utils/captureView';
 import {
   Upload,
   Eye,
@@ -104,13 +105,13 @@ export const ImageStage: React.FC<ImageStageProps> = ({
     // High-Definition ArcGIS World Imagery Satellite Layer (Resolution down to building level)
     L.tileLayer(
       'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-      { maxZoom: 19 }
+      { maxZoom: 19, crossOrigin: 'anonymous' }
     ).addTo(map);
 
     // High-Resolution Reference Places & Boundaries
     L.tileLayer(
       'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
-      { maxZoom: 19, opacity: 0.75 }
+      { maxZoom: 19, opacity: 0.75, crossOrigin: 'anonymous' }
     ).addTo(map);
 
     const layerGroup = L.layerGroup().addTo(map);
@@ -119,6 +120,7 @@ export const ImageStage: React.FC<ImageStageProps> = ({
     const broadcastBounds = () => {
       const currentZoom = map.getZoom();
       setCurrentZoomLevel(currentZoom);
+      setActiveMap(map);
       if (onViewportChange) {
         const bounds = map.getBounds();
         onViewportChange(
@@ -131,6 +133,10 @@ export const ImageStage: React.FC<ImageStageProps> = ({
     map.on('moveend zoomend', broadcastBounds);
 
     mapInstanceRef.current = map;
+    if (mapContainerRef.current) {
+      (mapContainerRef.current as any)._leaflet_map = map;
+    }
+    setActiveMap(map);
     broadcastBounds();
 
     const timer = setTimeout(() => {
@@ -139,6 +145,9 @@ export const ImageStage: React.FC<ImageStageProps> = ({
 
     return () => {
       clearTimeout(timer);
+      if ((window as any).__ACTIVE_LEAFLET_MAP__ === map) {
+        (window as any).__ACTIVE_LEAFLET_MAP__ = null;
+      }
       map.remove();
       mapInstanceRef.current = null;
     };
@@ -147,7 +156,7 @@ export const ImageStage: React.FC<ImageStageProps> = ({
   const prevNavKeyRef = useRef<number | undefined>(navKey);
   const prevCenterRef = useRef<{ lat: number; lng: number }>({ lat: centerLat, lng: centerLng });
 
-  // Fly to location ONLY on explicit navigation triggers (navKey changed)
+  // Fly to location & place target marker ONLY on explicit navigation triggers (navKey changed)
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map) return;
@@ -162,15 +171,15 @@ export const ImageStage: React.FC<ImageStageProps> = ({
 
       const flyTarget = coordsChanged ? [centerLat, centerLng] as [number, number] : [map.getCenter().lat, map.getCenter().lng] as [number, number];
       map.flyTo(flyTarget, targetZoom, { duration: 1.0 });
-    }
 
-    // Marker
-    if (markerRef.current) {
-      markerRef.current.remove();
+      // Marker & Popup: Only update on explicit navigation and NEVER autoPan the camera
+      if (markerRef.current) {
+        markerRef.current.remove();
+      }
+      const marker = L.marker([centerLat, centerLng]).addTo(map);
+      marker.bindPopup(`<strong>${locationName}</strong><br/>Sentinel-2 / SAR Observation Target`, { autoPan: false }).openPopup();
+      markerRef.current = marker;
     }
-    const marker = L.marker([centerLat, centerLng]).addTo(map);
-    marker.bindPopup(`<strong>${locationName}</strong><br/>Sentinel-2 / SAR Observation Target`).openPopup();
-    markerRef.current = marker;
   }, [navKey, centerLat, centerLng, zoom, locationName]);
 
   // Update Evidence Polygons & Bounding Boxes without moving the map camera

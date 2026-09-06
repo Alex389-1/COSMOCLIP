@@ -178,14 +178,17 @@ COMPARE_SATELLITE_IMAGES_DECLARATION = types.FunctionDeclaration(
 ZOOM_MAP_DECLARATION = types.FunctionDeclaration(
     name="zoom_map",
     description=(
-        "Zoom into, zoom out of, or focus on a specific sector, building, feature, or area of the satellite map image up to maximum zoom level 19. "
-        "Invoke this tool whenever the user asks to 'zoom in', 'zoom out', 'zoom into the building/lake/cars', "
-        "'focus on this area', 'magnify the map', or 'zoom to max/maximum'. "
-        "Standard Web Mercator zoom levels: 14 for city overview, 16 for neighborhood, 18 for street/building detail, and 19 for maximum close-up sub-meter resolution. "
+        "Zoom into, zoom out of, or change the zoom level of the satellite map. "
+        "Invoke this tool ONLY when the user EXPLICITLY uses zoom/magnify commands such as: "
+        "'zoom in', 'zoom out', 'zoom to max', 'zoom to maximum', 'magnify the map', 'get closer', 'zoom level 18'. "
+        "Standard Web Mercator zoom levels: 14 for city overview, 16 for neighborhood, 18 for street/building detail, "
+        "and 19 for maximum close-up sub-meter resolution. "
         "RULES: "
         "- To 'zoom in' or 'magnify': set action='zoom_in' and/or zoom_level=18 or 19. Do NOT pass numbers below 13 for zoom in. "
         "- To 'zoom to max': set action='zoom_to_max' and zoom_level=19. "
-        "- To 'zoom out': set action='zoom_out'."
+        "- To 'zoom out': set action='zoom_out'. "
+        "DO NOT invoke this tool when the user asks questions about buildings, cars, objects, or features visible on screen. "
+        "Those are analysis questions \u2014 use `analyze_satellite_image` for those, not `zoom_map`."
     ),
     parameters=types.Schema(
         type="OBJECT",
@@ -200,7 +203,7 @@ ZOOM_MAP_DECLARATION = types.FunctionDeclaration(
             ),
             "target_area": types.Schema(
                 type="STRING",
-                description="Target area or feature to focus on (e.g. 'center', 'north', 'south', 'east', 'west', 'building', 'water', 'dock', 'roads').",
+                description="Target area or feature to focus on (e.g. 'center', 'north', 'south', 'east', 'west').",
             ),
             "pan_direction": types.Schema(
                 type="STRING",
@@ -281,6 +284,12 @@ async def _handle_zoom_map(args: Dict[str, Any], context: Optional[Dict[str, Any
 
 
 
+INVALID_LOCATIONS = {
+    "previous context", "previous", "context", "none", "null", "undefined",
+    "target location", "current location", "current viewport location", "current context",
+    "global", "earth", "world"
+}
+
 async def _handle_get_location_coordinates(args: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> str:
     from voice_speech.engine.conversation.state import get_or_create_session_state
     from backend.app.agent.controller import CosmoClipAgentController
@@ -288,10 +297,12 @@ async def _handle_get_location_coordinates(args: Dict[str, Any], context: Option
 
     location = str((args or {}).get("location", "")).strip()
     session_id = (context or {}).get("session_id", "default")
-    if not location:
-        return "Please specify a location name to look up coordinates."
+    if not location or location.lower() in INVALID_LOCATIONS:
+        return "Please specify a valid city or landmark name to look up coordinates."
 
     geo = RealtimeImageryService.geocode(location)
+    if not geo or not geo.get("lat") or not geo.get("lon") or (geo.get("lat") == 0.0 and geo.get("lon") == 0.0):
+        return f"Could not find geographic coordinates for '{location}'. Please specify a more specific city or landmark."
     lat = geo["lat"]
     lon = geo["lon"]
     display_name = geo["name"]
@@ -321,9 +332,9 @@ async def _handle_compare_satellite_images(args: Dict[str, Any], context: Option
     session_state = get_or_create_session_state(session_id)
 
     raw_location = args.get("location")
-    has_explicit_loc = bool(raw_location and str(raw_location).strip())
+    has_explicit_loc = bool(raw_location and str(raw_location).strip() and str(raw_location).strip().lower() not in INVALID_LOCATIONS)
     location = str(raw_location).strip() if has_explicit_loc else None
-    if not location and session_state.active_location_name and "global" not in session_state.active_location_name.lower():
+    if not location and session_state.active_location_name and session_state.active_location_name.lower() not in INVALID_LOCATIONS:
         location = session_state.active_location_name
 
     date1 = str(args.get("date1", "2020")).strip()
@@ -339,10 +350,11 @@ async def _handle_compare_satellite_images(args: Dict[str, Any], context: Option
 
     viewport_bbox = None if has_explicit_loc else ((args or {}).get("viewport_bbox") or (context or {}).get("viewport_bbox") or session_state.active_viewport_bbox)
     viewport_zoom = None if has_explicit_loc else ((args or {}).get("viewport_zoom") or (context or {}).get("viewport_zoom") or session_state.active_viewport_zoom)
+    viewport_captured_at = None if has_explicit_loc else session_state.active_viewport_captured_at
 
     logger.info(
         f"Bi-temporal change voice tool: full_query='{full_query}', location='{location}', "
-        f"zoom={viewport_zoom}, bbox={viewport_bbox}"
+        f"zoom={viewport_zoom}, bbox={viewport_bbox}, captured_at={viewport_captured_at}"
     )
 
     controller = CosmoClipAgentController()
@@ -351,12 +363,15 @@ async def _handle_compare_satellite_images(args: Dict[str, Any], context: Option
         "location_name": location if location else None,
         "viewport_bbox": viewport_bbox,
         "viewport_zoom": viewport_zoom,
+        "viewport_captured_at": viewport_captured_at,
         "session_id": session_id,
         "enable_grounding": True,
         "enable_voice_response": True,
     })
 
     session_state.latest_response = response.model_dump()
+    if response.is_new_location_query and response.location_meta:
+        session_state.session_active_entity = response.location_meta.get("name")
     return response.spoken_text or response.answer
 
 
@@ -369,14 +384,32 @@ async def _handle_analyze_satellite_image(args: Dict[str, Any], context: Optiona
     session_state = get_or_create_session_state(session_id)
 
     raw_location = args.get("location")
-    has_explicit_loc = bool(raw_location and str(raw_location).strip())
+    has_explicit_loc = bool(raw_location and str(raw_location).strip() and str(raw_location).strip().lower() not in INVALID_LOCATIONS)
     location = str(raw_location).strip() if has_explicit_loc else None
+    question = str(args.get("question", "")).strip()
 
-    # Fallback to active viewport location only if user didn't specify a new one and not global grid
-    if not location and session_state.active_location_name and "global" not in session_state.active_location_name.lower():
+    image_base64 = None if has_explicit_loc else ((args or {}).get("image_base64") or (context or {}).get("image_base64") or session_state.active_screenshot_base64)
+
+    # 1. DIRECT CURRENT-VIEW DISPATCH:
+    # If user is asking about the current screen/view without naming a new destination to navigate to,
+    # and a live canvas screenshot is available: analyze the active screen pixels immediately.
+    # Do NOT append "around <visited_location>" and do NOT re-fetch satellite imagery for the visited place!
+    if not has_explicit_loc and image_base64:
+        logger.info(f"Analyze satellite voice tool: Direct Current-View screenshot analysis for '{question}'")
+        controller = CosmoClipAgentController()
+        response = await controller.run_current_view(
+            question=question or "What can you see on screen?",
+            image_base64=image_base64,
+            session_id=session_id
+        )
+        session_state.latest_response = response.model_dump()
+        return response.spoken_text or response.answer
+
+    # 2. NAVIGATION / EXPLICIT LOCATION PATH:
+    # Only fallback to active location name if user explicitly didn't provide a screenshot
+    if not location and session_state.active_location_name and session_state.active_location_name.lower() not in INVALID_LOCATIONS:
         location = session_state.active_location_name
 
-    question = str(args.get("question", "")).strip()
     if location and location.lower() not in question.lower():
         full_query = f"{question} around {location}"
     else:
@@ -384,24 +417,30 @@ async def _handle_analyze_satellite_image(args: Dict[str, Any], context: Optiona
 
     viewport_bbox = None if has_explicit_loc else ((args or {}).get("viewport_bbox") or (context or {}).get("viewport_bbox") or session_state.active_viewport_bbox)
     viewport_zoom = None if has_explicit_loc else ((args or {}).get("viewport_zoom") or (context or {}).get("viewport_zoom") or session_state.active_viewport_zoom)
+    viewport_captured_at = None if has_explicit_loc else session_state.active_viewport_captured_at
 
     logger.info(
         f"Analyze satellite voice tool: full_query='{full_query}', location='{location}', "
-        f"zoom={viewport_zoom}, bbox={viewport_bbox}"
+        f"has_screenshot={bool(image_base64)}, zoom={viewport_zoom}, bbox={viewport_bbox}"
     )
 
     controller = CosmoClipAgentController()
     response = await controller.run({
         "question": full_query,
         "location_name": location if location else None,
+        "image_base64": image_base64,
         "viewport_bbox": viewport_bbox,
         "viewport_zoom": viewport_zoom,
+        "viewport_captured_at": viewport_captured_at,
         "session_id": session_id,
         "enable_grounding": True,
         "enable_voice_response": True,
     })
 
     session_state.latest_response = response.model_dump()
+    # Update session entity on navigation intent so followup queries use correct context
+    if response.is_new_location_query and response.location_meta:
+        session_state.session_active_entity = response.location_meta.get("name")
     return response.spoken_text or response.answer
 
 

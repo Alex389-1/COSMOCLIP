@@ -33,7 +33,9 @@ async def ws_reader(websocket: WebSocket, state: ConversationState) -> None:
                 try:
                     import json
                     payload = json.loads(text_data)
-                    if isinstance(payload, dict) and payload.get("type") == "viewport_update":
+                    if isinstance(payload, dict) and payload.get("type") in ("viewport_update", "screenshot_update"):
+                        if payload.get("image_base64"):
+                            state.active_screenshot_base64 = payload["image_base64"]
                         if "viewport_bbox" in payload:
                             state.active_viewport_bbox = payload.get("viewport_bbox")
                         if "zoom" in payload and payload.get("zoom") is not None:
@@ -44,9 +46,12 @@ async def ws_reader(websocket: WebSocket, state: ConversationState) -> None:
                             state.active_center_lat = float(payload.get("center_lat"))
                         if payload.get("center_lng") is not None:
                             state.active_center_lon = float(payload.get("center_lng"))
+                        # captured_at for staleness check in tools.py
+                        if payload.get("captured_at") is not None:
+                            state.active_viewport_captured_at = float(payload["captured_at"])
                         logger.info(
-                            f"Live voice viewport updated: zoom={state.active_viewport_zoom}, "
-                            f"bbox={state.active_viewport_bbox}, loc='{state.active_location_name}'"
+                            f"Live voice context updated: zoom={state.active_viewport_zoom}, "
+                            f"has_screenshot={bool(state.active_screenshot_base64)}, loc='{state.active_location_name}'"
                         )
                 except Exception as e:
                     logger.debug(f"Non-JSON or invalid text ws message: {e}")
@@ -195,6 +200,7 @@ async def gemini_to_browser(
 
                 # 2. Server-Side Barge-In Interruption
                 if getattr(server_content, "interrupted", False):
+                    state.is_playing = False
                     new_epoch = state.advance_epoch()
                     logger.info(f"Barge-in triggered by Gemini! Epoch advanced to {new_epoch}.")
                     await state.safe_send_json(
@@ -208,27 +214,39 @@ async def gemini_to_browser(
                 if model_turn:
                     for part in model_turn.parts:
                         if part.inline_data and part.inline_data.data:
+                            if not state.is_playing:
+                                state.is_playing = True
+                                await state.safe_send_json(websocket, {"type": "state", "state": "PLAYING"})
                             epoch_header = state.current_epoch.to_bytes(4, byteorder="big")
                             await state.safe_send_bytes(websocket, epoch_header + part.inline_data.data)
-                            await state.safe_send_json(websocket, {"type": "state", "state": "PLAYING"})
 
                 # 4. Turn Complete
                 if getattr(server_content, "turn_complete", False):
                     logger.info("Gemini turn completed.")
+                    state.is_playing = False
                     await state.safe_send_json(websocket, {"type": "state", "state": "LISTENING"})
 
         except asyncio.CancelledError:
             break
         except Exception as e:
-            if state.session_active:
-                logger.error(f"Gemini receive error: {e}")
-                if "exhausted" in str(e).lower() or "1011" in str(e):
-                    session_mgr.trip_circuit_breaker()
-                    state.terminate()
-                    await state.safe_send_json(
-                        websocket,
-                        {"type": "error", "message": f"Gemini API Quota Exceeded. Please wait ~{int(session_mgr.cooldown_seconds)}s before retrying."}
-                    )
+            err_str = str(e).lower()
+            if not state.session_active:
+                break
+            # Soft-recover from empty model turn errors caused by context window compression.
+            # These are transient and the session can continue normally after them.
+            if "model output" in err_str and ("output text" in err_str or "tool calls" in err_str):
+                logger.warning(f"Gemini emitted empty model turn (likely context compression artefact). Continuing session. Detail: {e}")
+                state.is_playing = False
+                await state.safe_send_json(websocket, {"type": "state", "state": "LISTENING"})
+                continue
+            logger.error(f"Gemini receive error: {e}")
+            if "exhausted" in err_str or "1011" in str(e):
+                session_mgr.trip_circuit_breaker()
+                state.terminate()
+                await state.safe_send_json(
+                    websocket,
+                    {"type": "error", "message": f"Gemini API Quota Exceeded. Please wait ~{int(session_mgr.cooldown_seconds)}s before retrying."}
+                )
             break
 
 
@@ -244,11 +262,16 @@ async def run_live_bridge(
     """Runs the persistent bidirectional bridge with automated session resumption reconnects."""
     model_name = settings.gemini.model
     reader_task = asyncio.create_task(ws_reader(websocket, state))
-    connect_attempts = 0
-    max_attempts = 3
+    # Max reconnect attempts per connection loss event (not cumulative across the session)
+    max_attempts = 8
 
     try:
         while state.session_active:
+            # Reset attempt counter at the start of each outer loop cycle.
+            # This ensures a previous failure run doesn't block future reconnects
+            # after a successful go_away → resumption cycle.
+            connect_attempts = 0
+
             # Check circuit breaker before each reconnect attempt
             is_open, remaining = session_mgr.is_circuit_open()
             if is_open:
@@ -269,67 +292,94 @@ async def run_live_bridge(
             is_resumed = bool(state.resumption_handle)
             logger.info(f"Connecting to Gemini Live (model={model_name}, voice={voice}, resumed={is_resumed})...")
 
-            try:
-                await state.safe_send_json(
-                    websocket,
-                    {"type": "state", "state": "CONNECTING", "message": f"Connecting to Gemini Live ({model_name})..."}
-                )
-
-                async with client.aio.live.connect(model=model_name, config=connect_config) as session:
-                    connect_attempts = 0
-                    logger.info("Connected to Gemini Live session successfully!")
+            connected_ok = False
+            while state.session_active and connect_attempts < max_attempts:
+                try:
                     await state.safe_send_json(
                         websocket,
-                        {"type": "state", "state": "LISTENING", "message": "Gemini Live Voice Active! Speak freely anytime..."}
+                        {"type": "state", "state": "CONNECTING", "message": f"Connecting to Gemini Live ({model_name})..."}
                     )
 
-                    mic_task = asyncio.create_task(mic_to_gemini(session, state, session_mgr, websocket))
-                    gemini_task = asyncio.create_task(gemini_to_browser(session, state, session_mgr, websocket))
+                    async with client.aio.live.connect(model=model_name, config=connect_config) as session:
+                        connect_attempts = 0
+                        connected_ok = True
+                        logger.info("Connected to Gemini Live session successfully!")
+                        await state.safe_send_json(
+                            websocket,
+                            {"type": "state", "state": "LISTENING", "message": "Gemini Live Voice Active! Speak freely anytime..."}
+                        )
 
-                    done, pending = await asyncio.wait(
-                        [mic_task, gemini_task],
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    for t in pending:
-                        t.cancel()
-                    await asyncio.gather(*pending, return_exceptions=True)
+                        mic_task = asyncio.create_task(mic_to_gemini(session, state, session_mgr, websocket))
+                        gemini_task = asyncio.create_task(gemini_to_browser(session, state, session_mgr, websocket))
 
-            except Exception as conn_err:
-                if not state.session_active:
-                    break
-                logger.warning(f"Gemini connection error (attempt {connect_attempts+1}/{max_attempts}): {conn_err}")
+                        done, pending = await asyncio.wait(
+                            [mic_task, gemini_task],
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        for t in pending:
+                            t.cancel()
+                        await asyncio.gather(*pending, return_exceptions=True)
 
-                if "exhausted" in str(conn_err).lower() or "1011" in str(conn_err):
-                    session_mgr.trip_circuit_breaker()
-                    await state.safe_send_json(
-                        websocket,
-                        {"type": "error", "message": f"Gemini API Quota Exceeded. Please wait ~{int(session_mgr.cooldown_seconds)}s before retrying."}
-                    )
-                    state.terminate()
+                    # Clean session exit (go_away handled, or task completed normally)
                     break
 
-                connect_attempts += 1
-                if connect_attempts < max_attempts and state.session_active:
-                    await state.safe_send_json(
-                        websocket,
-                        {"type": "state", "state": "CONNECTING", "message": f"Retrying Gemini Live connection ({connect_attempts}/{max_attempts})..."}
-                    )
-                    await asyncio.sleep(1.0)
-                    continue
+                except Exception as conn_err:
+                    if not state.session_active:
+                        break
 
-                if state.resumption_handle and state.session_active:
-                    logger.info("Gemini session ended. Resuming session seamlessly in 0.5s...")
-                    await asyncio.sleep(0.5)
-                else:
-                    await state.safe_send_json(
-                        websocket,
-                        {"type": "error", "message": f"Could not connect to Gemini Live: {conn_err}"}
-                    )
-                    break
+                    err_str = str(conn_err)
+                    logger.warning(f"Gemini connection error (attempt {connect_attempts + 1}/{max_attempts}): {err_str[:120]}")
 
+                    # Fatal: quota exhaustion — no point retrying
+                    if "exhausted" in err_str.lower() or "1011" in err_str:
+                        session_mgr.trip_circuit_breaker()
+                        await state.safe_send_json(
+                            websocket,
+                            {"type": "error", "message": f"Gemini API Quota Exceeded. Please wait ~{int(session_mgr.cooldown_seconds)}s before retrying."}
+                        )
+                        state.terminate()
+                        return
+
+                    connect_attempts += 1
+                    if connect_attempts < max_attempts and state.session_active:
+                        # Exponential backoff: 1s, 2s, 4s, 8s … capped at 10s
+                        backoff = min(10.0, 2 ** (connect_attempts - 1))
+                        logger.info(f"Retrying Gemini connection in {backoff:.0f}s ({connect_attempts}/{max_attempts})...")
+                        await state.safe_send_json(
+                            websocket,
+                            {"type": "state", "state": "CONNECTING", "message": f"Reconnecting to Gemini Live ({connect_attempts}/{max_attempts})..."}
+                        )
+                        await asyncio.sleep(backoff)
+                    else:
+                        # All attempts exhausted
+                        if state.resumption_handle and state.session_active:
+                            # We have a resumption handle — try once more in the outer loop
+                            logger.warning("All retry attempts exhausted but resumption handle present. Outer loop will retry.")
+                        else:
+                            await state.safe_send_json(
+                                websocket,
+                                {"type": "error", "message": f"Could not connect to Gemini Live after {max_attempts} attempts."}
+                            )
+                            state.terminate()
+                        break
+
+            if not state.session_active:
+                break
+
+            # Session ended cleanly (go_away or normal turn end) — resume seamlessly
             if state.resumption_handle and state.session_active:
-                logger.info("Gemini session finished turn. Resuming session in 0.5s...")
-                await asyncio.sleep(0.5)
+                logger.info("Gemini session ended. Seamless resumption in 0.3s...")
+                await asyncio.sleep(0.3)
+                # Rebuild config with updated resumption handle for next connect
+                connect_config = build_connect_config(
+                    settings=settings,
+                    voice=voice,
+                    language=language,
+                    resumption_handle=state.resumption_handle,
+                )
+            elif not connected_ok:
+                # Never connected successfully and no resumption handle — give up
+                break
 
     finally:
         state.terminate()

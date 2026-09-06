@@ -26,6 +26,49 @@ class CosmoClipAgentController:
         self.vqa_specialist = SatelliteVQASpecialistTool()
         self.web_intelligence = WebIntelligenceTool()
 
+    async def run_current_view(self, question: str, image_base64: str, session_id: str = "default_session") -> QueryResponse:
+        run_id = f"run_{uuid.uuid4().hex[:10]}"
+        t0 = time.perf_counter()
+
+        emit_log("INFO", "LANGGRAPH", f"Analyzing current screen view for: '{question}'...")
+        vqa_res = await self.vqa_specialist.analyze_screenshot(question, image_base64)
+
+        latency = (time.perf_counter() - t0) * 1000.0
+        trace = [
+            TraceStep(
+                step="capture_current_view",
+                status="ok",
+                latency_ms=0.0,
+                detail="Direct client-side canvas screenshot received.",
+                timestamp=datetime.now(timezone.utc).isoformat()
+            ),
+            TraceStep(
+                step="vlm_screenshot_analysis",
+                status="ok",
+                latency_ms=round(latency, 2),
+                detail="Direct VLM inspection of active client screen canvas complete.",
+                timestamp=datetime.now(timezone.utc).isoformat()
+            )
+        ]
+
+        return QueryResponse(
+            run_id=run_id,
+            task="vqa",
+            target_entity="current_screen_view",
+            answer=vqa_res.get("answer", "Analysis completed."),
+            spoken_text=vqa_res.get("spoken_text", vqa_res.get("answer", "")),
+            is_comparison=False,
+            is_submeter_highres=True,
+            is_new_location_query=False,
+            should_recenter_map=False,
+            resolution_badge="Analyzing Current Screen View",
+            query_intent="current_view",
+            query_type="current_view",
+            confidence=vqa_res.get("confidence", ConfidenceInfo(score=0.95, category="High")),
+            evidence=vqa_res.get("evidence", []),
+            trace=trace
+        )
+
     async def run(self, request_payload: Dict[str, Any]) -> QueryResponse:
         run_id = f"run_{uuid.uuid4().hex[:10]}"
         start_overall = time.perf_counter()
@@ -39,6 +82,7 @@ class CosmoClipAgentController:
             "bbox": request_payload.get("bbox"),
             "viewport_bbox": request_payload.get("viewport_bbox"),
             "viewport_zoom": request_payload.get("viewport_zoom"),
+            "viewport_captured_at": request_payload.get("viewport_captured_at"),
             "use_viewport_bbox": False,
             "is_fine_detail": False,
             "is_submeter_highres": False,
@@ -47,7 +91,12 @@ class CosmoClipAgentController:
             "enable_voice_response": request_payload.get("enable_voice_response", True),
             "session_id": request_payload.get("session_id", "default_session"),
             "execution_trace": [],
-            "evidence_regions": []
+            "evidence_regions": [],
+            # Intent defaults — will be set by _node_interpret_query
+            "query_intent": "navigation",
+            "should_recenter_map": True,
+            "needs_high_res": False,
+            "image_gsd_m": 10.0,
         }
 
         # Step 1: Input Validation
@@ -57,6 +106,62 @@ class CosmoClipAgentController:
 
         # Step 2: Query Interpretation & Geocoding
         state = await self._node_interpret_query(state)
+
+        # Current-View Screenshot Path:
+        # If client passed an image_base64 screenshot and the interpreted query is NOT a navigation
+        # intent, analyze the screenshot directly with the VLM.
+        if request_payload.get("image_base64"):
+            query_intent = state.get("query_intent", "")
+            is_navigation = (query_intent == "navigation")
+            if not is_navigation:
+                return await self.run_current_view(
+                    question=state["question"],
+                    image_base64=request_payload["image_base64"],
+                    session_id=state.get("session_id", "default_session")
+                )
+
+        # Early Short-Circuit on Unresolved Navigation Target:
+        # If the user explicitly requested navigation to a place that could not be geocoded across
+        # all providers, provide an honest, actionable response. Do NOT silently snap the map, and
+        # do NOT run vision inference against whatever random satellite image happens to be in view.
+        if state.get("geocoding_failed"):
+            unresolved = state.get("unresolved_place") or "that location"
+            has_vp = state.get("use_viewport_bbox", False)
+            if has_vp:
+                answer = f"I couldn't find a place called '{unresolved}'. The map has remained on your current view. Would you like me to describe what is currently visible on your screen, or search for a different city or landmark?"
+                spoken = f"I couldn't find '{unresolved}'. The map remains on your current view. Would you like me to describe what's in view?"
+            else:
+                answer = f"I couldn't find geographic coordinates for '{unresolved}'. Please specify a recognized city, district, or landmark name."
+                spoken = f"I couldn't find geographic coordinates for '{unresolved}'. Please try a different place name."
+
+            state["final_answer"] = answer
+            state["spoken_text"] = spoken
+            state["should_recenter_map"] = False
+            state["is_new_location_query"] = False
+            state["execution_trace"].append(
+                TraceStep(
+                    step="unresolved_location_notice",
+                    status="warning",
+                    latency_ms=0.0,
+                    detail=f"Navigation destination '{unresolved}' could not be geocoded across live OSM/Photon/AI providers. Alerted user honestly without recentering map.",
+                    timestamp=datetime.now(timezone.utc).isoformat()
+                )
+            )
+            return QueryResponse(
+                run_id=state["run_id"],
+                task="navigation",
+                target_entity=unresolved,
+                answer=answer,
+                spoken_text=spoken,
+                is_comparison=False,
+                is_submeter_highres=has_vp,
+                is_new_location_query=False,
+                resolution_badge="Unresolved Location",
+                query_intent="navigation",
+                location_meta=state.get("location_meta"),
+                confidence=ConfidenceInfo(score=0.90, category="High", rationale="Direct geocoding lookup validation"),
+                trace=state.get("execution_trace", []),
+            )
 
         # Step 3: Real-Time Multimodal Satellite Imagery Retrieval (Optical + SAR)
         state = await self._node_prepare_realtime_imagery(state)
@@ -98,6 +203,9 @@ class CosmoClipAgentController:
             is_submeter_highres=state.get("is_submeter_highres", False),
             is_new_location_query=state.get("is_new_location_query", False),
             resolution_badge=state.get("resolution_badge", "Sentinel-2 MSI (10m GSD)"),
+            query_intent=state.get("query_intent"),
+            should_recenter_map=state.get("should_recenter_map", False),
+            image_gsd_m=state.get("image_gsd_m"),
             image_url=state.get("image_url"),
             optical_url=state.get("optical_url"),
             sar_url=state.get("sar_url"),
@@ -159,9 +267,11 @@ class CosmoClipAgentController:
         intent = QueryInterpreter.interpret(
             raw_q,
             location_hint=state.get("location_name"),
-            viewport_bbox=state.get("viewport_bbox")
+            viewport_bbox=state.get("viewport_bbox"),
+            viewport_captured_at=state.get("viewport_captured_at"),
+            viewport_zoom=state.get("viewport_zoom"),
         )
-        
+
         if intent.get("corrected_question"):
             state["question"] = intent["corrected_question"]
         state["task_type"] = intent["task"]
@@ -170,10 +280,36 @@ class CosmoClipAgentController:
         state["is_fine_detail"] = intent.get("is_fine_detail", False)
         state["use_viewport_bbox"] = intent.get("use_viewport_bbox", False)
         state["is_new_location_query"] = intent.get("is_new_location_query", False)
-        state["location_meta"] = intent["geocoded_location"]
+        loc_meta = intent.get("geocoded_location")
+        if not loc_meta:
+            loc_meta = {
+                "name": "Current Observation Area",
+                "lat": 28.7495,
+                "lon": 77.4912,
+                "zoom": 15,
+                "bbox": [77.48, 28.74, 77.51, 28.76],
+                "display_name": "Current Observation Area"
+            }
+        state["geocoding_failed"] = intent.get("geocoding_failed", False)
+        state["unresolved_place"] = intent.get("unresolved_place")
+        state["location_meta"] = loc_meta
         state["query_intent_meta"] = intent
         state["baseline_year"] = intent.get("baseline_year")
-        loc_name = intent["geocoded_location"]["name"]
+
+        # --- Active-Viewport Analysis: set intent + map-movement signal ---
+        query_intent = intent.get("query_intent", "navigation")
+        state["query_intent"] = query_intent
+        # Map only moves on navigation intent with genuine new location coordinates —
+        # this is the single authoritative decision point; the frontend must not re-infer it from coordinate drift.
+        state["should_recenter_map"] = (query_intent == "navigation" and state["is_new_location_query"])
+        state["needs_high_res"] = intent.get("is_fine_detail", False) and (query_intent == "viewport_bound")
+
+        # Session memory: only update on successful navigation, never on viewport_bound or failed geocodes
+        if query_intent == "navigation" and state["is_new_location_query"]:
+            loc_name = loc_meta.get("name", "")
+            state["session_active_entity"] = state.get("location_name") or loc_name
+            state["session_active_entity_name"] = loc_name
+        loc_name = loc_meta.get("name", "Current Observation Area")
 
         if not state.get("is_new_location_query") and (state["use_viewport_bbox"] or (state.get("viewport_zoom") and state.get("viewport_zoom") >= 17) or state.get("is_fine_detail")) and state.get("viewport_bbox"):
             state["use_viewport_bbox"] = True
@@ -181,21 +317,27 @@ class CosmoClipAgentController:
             state["query_bbox"] = state["viewport_bbox"]
             state["query_zoom"] = max(state.get("viewport_zoom") or 18, 18)
             state["resolution_badge"] = f"Sub-Meter High-Res (~0.5m GSD, Zoom {state['query_zoom']})"
+            state["image_gsd_m"] = 0.5
             emit_log("INFO", "LANGGRAPH", f"Node [interpret_query]: Fine-detail query detected -> Synced to live map viewport at Zoom {state['query_zoom']} (Sub-Meter Mode)")
         else:
-            state["query_bbox"] = state.get("bbox") or intent["geocoded_location"].get("bbox")
-            state["query_zoom"] = intent["geocoded_location"].get("zoom", 14)
+            state["query_bbox"] = state.get("bbox") or loc_meta.get("bbox")
+            state["query_zoom"] = loc_meta.get("zoom", 14)
+            state["image_gsd_m"] = 10.0
             emit_log("INFO", "LANGGRAPH", f"Node [interpret_query]: Disambiguated '{raw_q[:30]}...' -> '{state['question']}'")
-            emit_log("INFO", "GEOCODER", f"Resolved dynamic coordinates: '{loc_name}' -> {intent['geocoded_location']['lat']:.4f}°N, {intent['geocoded_location']['lon']:.4f}°E")
+            emit_log("INFO", "GEOCODER", f"Resolved dynamic coordinates: '{loc_name}' -> {loc_meta.get('lat', 0.0):.4f}°N, {loc_meta.get('lon', 0.0):.4f}°E")
 
         latency = (time.perf_counter() - t0) * 1000.0
         mode_desc = f"Sub-Meter Viewport Synced (Zoom {state['query_zoom']})" if state["use_viewport_bbox"] else f"Geocoded Location '{loc_name}'"
+        is_fallback_engaged = bool(intent.get("is_fallback"))
+        if is_fallback_engaged:
+            emit_log("WARNING", "CONTROLLER", f"Query interpreted using deterministic FALLBACK router (LLM timed out/offline) -> intent='{query_intent}'")
+
         state["execution_trace"].append(
             TraceStep(
                 step="interpret_query",
-                status="ok",
+                status="warning" if is_fallback_engaged else "ok",
                 latency_ms=round(latency, 2),
-                detail=f"Task: '{intent['task']}' | Entity: '{intent['target']}' | Target: {mode_desc}.",
+                detail=f"Intent: '{query_intent}' {'[FALLBACK ENGAGED]' if is_fallback_engaged else '[LLM UNIFIED]'} | Task: '{intent['task']}' | Entity: '{intent['target']}' | Target: {mode_desc} | MapMove: {state['should_recenter_map']}.",
                 timestamp=datetime.now(timezone.utc).isoformat()
             )
         )

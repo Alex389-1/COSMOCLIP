@@ -86,6 +86,8 @@ export interface QueryRequest {
   bbox?: [number, number, number, number];
   viewport_bbox?: [number, number, number, number]; // [west, south, east, north]
   viewport_zoom?: number;
+  /** ms epoch — for backend staleness check */
+  viewport_captured_at?: number;
   enable_grounding?: boolean;
   enable_voice_response?: boolean;
   session_id?: string;
@@ -95,6 +97,8 @@ export interface QueryResponse {
   run_id: string;
   task: string;
   target_entity?: string;
+  query_type?: string;
+  should_recenter_map?: boolean;
   answer: string;
   spoken_text: string;
   is_comparison: boolean;
@@ -148,6 +152,10 @@ export interface QueryResponse {
   model: ModelMetadata;
   trace: TraceStep[];
   audio_base64?: string;
+  /** Spatial intent classification: 'navigation' | 'viewport_bound' | 'followup' */
+  query_intent?: 'navigation' | 'viewport_bound' | 'followup';
+  /** Ground sample distance of the imagery used for this answer (metres) */
+  image_gsd_m?: number;
 }
 
 export interface ToolCapability {

@@ -11,6 +11,7 @@ class AgentState(TypedDict, total=False):
     bbox: Optional[List[float]]
     viewport_bbox: Optional[List[float]]
     viewport_zoom: Optional[int]
+    viewport_captured_at: Optional[float]   # ms epoch for staleness check
     use_viewport_bbox: bool
     is_fine_detail: bool
     query_bbox: Optional[List[float]]
@@ -21,14 +22,28 @@ class AgentState(TypedDict, total=False):
     enable_voice_response: bool
     session_id: str
 
+    # --- Active-Viewport Analysis intent classification ---
+    query_intent: Optional[str]             # 'navigation' | 'viewport_bound' | 'followup'
+    should_recenter_map: bool               # only True when intent == 'navigation'
+    needs_high_res: bool                    # True for fine-detail viewport-bound queries
+    resolved_location_name: Optional[str]  # display name chosen by resolve_location_context
+    last_query_bbox: Optional[List[float]] # bbox used by the previous query (for followup)
+    session_active_entity: Optional[str]   # only written on navigation, never viewport_bound
+    session_active_entity_name: Optional[str]
+    image_gsd_m: Optional[float]           # 0.5 for sub-meter, 10.0 for Sentinel-2
+
     # Interpretation & Geocoding
     is_valid_input: bool
     validation_error: Optional[str]
     task_type: str                  # 'vqa', 'change_analysis', 'captioning', 'grounding'
     target_entity: Optional[str]
     is_comparison: bool
+    is_new_location_query: bool
+    geocoding_failed: bool
+    unresolved_place: Optional[str]
     location_meta: Optional[Dict[str, Any]]
     query_intent_meta: Dict[str, Any]
+
 
     # Preprocessed assets
     image_bytes: Optional[bytes]

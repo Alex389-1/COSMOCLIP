@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import L from 'leaflet';
+import { setActiveMap } from '../utils/captureView';
 import {
   GitCompare,
   Sparkles,
@@ -297,6 +298,7 @@ export const ComparisonStage: React.FC<ComparisonStageProps> = ({
       maxZoom: cfg.maxZoom || 20,
       maxNativeZoom: cfg.maxNativeZoom ?? 17,
       className: cfg.filterClass || '',
+      crossOrigin: 'anonymous',
       errorTileUrl: cfg.errorTileUrl || 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
     });
   };
@@ -364,7 +366,7 @@ export const ComparisonStage: React.FC<ComparisonStageProps> = ({
     if (rightLayer === 'optical_satellite' || rightLayer === 'sar_radar' || rightLayer === 'ndvi_vegetation') {
       const overlay = L.tileLayer(
         'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
-        { maxZoom: 20, maxNativeZoom: 19, opacity: 0.65 }
+        { maxZoom: 20, maxNativeZoom: 19, opacity: 0.65, crossOrigin: 'anonymous' }
       ).addTo(mapRight);
       rightOverlayRef.current = overlay;
     }
@@ -403,6 +405,7 @@ export const ComparisonStage: React.FC<ComparisonStageProps> = ({
 
     leftMapInstanceRef.current = mapLeft;
     rightMapInstanceRef.current = mapRight;
+    setActiveMap(mapRight);
     setMapsVersion((v) => v + 1);
     broadcastViewport();
 
@@ -429,6 +432,7 @@ export const ComparisonStage: React.FC<ComparisonStageProps> = ({
       clearTimeout(t2);
       clearTimeout(t3);
       resizeObserver.disconnect();
+      setActiveMap(null);
       if (rightHeatmapOverlayRef.current && rightMapInstanceRef.current) {
         rightMapInstanceRef.current.removeLayer(rightHeatmapOverlayRef.current);
         rightHeatmapOverlayRef.current = null;
@@ -477,7 +481,7 @@ export const ComparisonStage: React.FC<ComparisonStageProps> = ({
     if (rightLayer === 'optical_satellite' || rightLayer === 'sar_radar' || rightLayer === 'ndvi_vegetation') {
       const overlay = L.tileLayer(
         'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
-        { maxZoom: 20, maxNativeZoom: 19, opacity: 0.65 }
+        { maxZoom: 20, maxNativeZoom: 19, opacity: 0.65, crossOrigin: 'anonymous' }
       ).addTo(rightMapInstanceRef.current);
       rightOverlayRef.current = overlay;
     }
@@ -645,7 +649,7 @@ export const ComparisonStage: React.FC<ComparisonStageProps> = ({
     // Add Reference Road & Boundary Overlay
     L.tileLayer(
       'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
-      { maxZoom: 20, maxNativeZoom: 19, opacity: 0.65 }
+      { maxZoom: 20, maxNativeZoom: 19, opacity: 0.65, crossOrigin: 'anonymous' }
     ).addTo(mapDiff);
 
     // Add Georeferenced Heatmap Overlay

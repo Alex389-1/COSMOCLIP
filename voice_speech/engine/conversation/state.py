@@ -21,16 +21,23 @@ class ConversationState:
     active_image_id: Optional[str] = None
     active_viewport_bbox: Optional[list] = None
     active_viewport_zoom: Optional[int] = None
+    active_viewport_captured_at: Optional[float] = None   # ms epoch for staleness check
     active_location_name: Optional[str] = None
     active_center_lat: Optional[float] = None
     active_center_lon: Optional[float] = None
+    active_screenshot_base64: Optional[str] = None
+    # Navigation-intent session memory — only updated when intent == 'navigation'
+    session_active_entity: Optional[str] = None
     latest_response: Optional[dict] = None
+    is_playing: bool = False
     mic_queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=30))
     ws_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
 
     def advance_epoch(self) -> int:
         """Increments the epoch counter on barge-in to invalidate obsolete playback buffers."""
         self.current_epoch += 1
+        self.is_playing = False
         return self.current_epoch
 
     def terminate(self) -> None:

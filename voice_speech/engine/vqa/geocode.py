@@ -12,6 +12,7 @@ Zero hardcoded coordinates — resolves any location on Earth dynamically.
 import asyncio
 import json
 import logging
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -42,7 +43,16 @@ async def geocode_location(query: str, timeout: float = 5.0) -> Optional[Tuple[f
     if not clean_query:
         return None
 
-    cache_key = clean_query.lower()
+    clean_lower = clean_query.lower()
+    norm_query = re.sub(r'[^a-z0-9\s]', '', clean_lower).strip()
+
+    # Special cartographic reference: Null Island (0°N, 0°E)
+    if norm_query in {"null island", "null-island", "nullisland", "soul buoy"}:
+        res = (0.0, 0.0, "Null Island (0°N, 0°E), Soul Buoy Station 13010, Gulf of Guinea")
+        _GEOCODE_CACHE[clean_lower] = res
+        return res
+
+    cache_key = clean_lower
     if cache_key in _GEOCODE_CACHE:
         logger.info(f"Geocode cache hit for '{clean_query}': {_GEOCODE_CACHE[cache_key]}")
         return _GEOCODE_CACHE[cache_key]
@@ -128,6 +138,12 @@ async def geocode_location(query: str, timeout: float = 5.0) -> Optional[Tuple[f
                     name = props.get("name") or clean_query
                     country = props.get("country") or ""
                     display_name = f"{name}, {country}".strip(", ")
+                    # Validate that proper query tokens match the display name
+                    q_words = [w for w in re.findall(r'\b[a-z0-9]{2,}\b', clean_lower) if w not in {"the", "a", "an", "island", "hill", "mountain", "lake", "river"}]
+                    disp_lower = display_name.lower()
+                    if q_words and not any(w in disp_lower for w in q_words):
+                        logger.warning(f"Photon result '{display_name}' rejected for query '{clean_query}': proper tokens {q_words} not found")
+                        return None
                     return lat, lon, display_name
         except Exception as e:
             logger.warning(f"Photon geocoding failed for '{clean_query}': {e}")

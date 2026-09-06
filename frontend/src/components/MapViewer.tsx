@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
 import { MapPin, Search, Crosshair, RefreshCw, Layers } from 'lucide-react';
 import { BoundingBox } from '../types';
+import { setActiveMap } from '../utils/captureView';
 
 interface MapViewerProps {
   centerLat: number;
@@ -53,13 +54,13 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     // Satellite Imagery Base Layer
     L.tileLayer(
       'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-      { maxZoom: 19 }
+      { maxZoom: 19, crossOrigin: 'anonymous' }
     ).addTo(map);
 
     // Reference labels layer
     L.tileLayer(
       'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
-      { maxZoom: 19, opacity: 0.8 }
+      { maxZoom: 19, opacity: 0.8, crossOrigin: 'anonymous' }
     ).addTo(map);
 
     const broadcastBounds = () => {
@@ -88,6 +89,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     });
 
     mapInstanceRef.current = map;
+    setActiveMap(map);
     broadcastBounds();
 
     const timer = setTimeout(() => {
@@ -96,6 +98,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
 
     return () => {
       clearTimeout(timer);
+      setActiveMap(null);
       map.remove();
       mapInstanceRef.current = null;
     };
@@ -119,15 +122,15 @@ export const MapViewer: React.FC<MapViewerProps> = ({
 
       const flyTarget = coordsChanged ? [centerLat, centerLng] as [number, number] : [map.getCenter().lat, map.getCenter().lng] as [number, number];
       map.flyTo(flyTarget, targetZoom, { duration: 1.0 });
-    }
 
-    // Update marker
-    if (markerRef.current) {
-      markerRef.current.remove();
+      // Update marker & popup ONLY on explicit navigation, never autoPan camera
+      if (markerRef.current) {
+        markerRef.current.remove();
+      }
+      const marker = L.marker([centerLat, centerLng]).addTo(map);
+      marker.bindPopup(`<strong>${locationName}</strong><br/>Sentinel-2 Real-Time AOI`, { autoPan: false }).openPopup();
+      markerRef.current = marker;
     }
-    const marker = L.marker([centerLat, centerLng]).addTo(map);
-    marker.bindPopup(`<strong>${locationName}</strong><br/>Sentinel-2 Real-Time AOI`).openPopup();
-    markerRef.current = marker;
   }, [navKey, centerLat, centerLng, zoom, locationName]);
 
   // Update Bounding Box rectangle if available without moving map camera

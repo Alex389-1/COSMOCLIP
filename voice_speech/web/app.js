@@ -998,22 +998,21 @@ function handleIncomingAudio(arrayBuffer) {
     float32Array[i] = int16Array[i] / 32768.0;
   }
 
+  const now = outputAudioCtx.currentTime;
+  if (nextPlayTime < now) {
+    nextPlayTime = now + 0.06;
+    const fadeSamples = Math.min(32, float32Array.length);
+    for (let i = 0; i < fadeSamples; i++) {
+      float32Array[i] *= (i / fadeSamples);
+    }
+  }
+
   const audioBuffer = outputAudioCtx.createBuffer(1, float32Array.length, 24000);
   audioBuffer.copyToChannel(float32Array, 0);
 
   const source = outputAudioCtx.createBufferSource();
   source.buffer = audioBuffer;
   source.connect(masterGainNode);
-
-  const now = outputAudioCtx.currentTime;
-  if (nextPlayTime < now) {
-    nextPlayTime = now + 0.02;
-    try {
-      masterGainNode.gain.cancelScheduledValues(now);
-      masterGainNode.gain.setValueAtTime(0.001, now);
-      masterGainNode.gain.exponentialRampToValueAtTime(0.85, now + 0.015);
-    } catch (e) {}
-  }
 
   source.start(nextPlayTime);
   nextPlayTime += audioBuffer.duration;

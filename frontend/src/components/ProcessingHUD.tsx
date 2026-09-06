@@ -9,7 +9,8 @@ import {
   CheckCircle2,
   Loader2,
   Compass,
-  Scan
+  Scan,
+  Camera
 } from 'lucide-react';
 
 interface ProcessingHUDProps {
@@ -17,9 +18,11 @@ interface ProcessingHUDProps {
   activeQuestion?: string;
   activeLocationName?: string;
   isVoiceActive?: boolean;
+  isCurrentView?: boolean;
+  screenshotSizeKb?: number;
 }
 
-const PROCESSING_STEPS = [
+const NAVIGATION_STEPS = [
   {
     id: 'geocode',
     title: 'Geocoding Location',
@@ -52,13 +55,61 @@ const PROCESSING_STEPS = [
   },
 ];
 
+const CURRENT_VIEW_STEPS = [
+  {
+    id: 'capture',
+    title: 'Screen Viewport Capture',
+    desc: 'Captured 4K active map canvas viewport & rasterized pixels for VLM inspection',
+    icon: <Camera className="w-4 h-4 text-emerald-400 animate-pulse" />,
+  },
+  {
+    id: 'vlm_direct',
+    title: 'VLM Screen Analysis',
+    desc: 'Multimodal AI direct vision analysis on active screen viewport pixels',
+    icon: <Cpu className="w-4 h-4 text-purple-400 animate-pulse" />,
+  },
+  {
+    id: 'grounding',
+    title: 'Building & Court Grounding',
+    desc: 'Extracting building geometry, domes, sports courts, and architectural features in view',
+    icon: <Scan className="w-4 h-4 text-cyan-400 animate-pulse" />,
+  },
+  {
+    id: 'voice',
+    title: 'Voice & Visual Synthesis',
+    desc: 'Synthesizing verified audio answer and evidence grounding cards',
+    icon: <Volume2 className="w-4 h-4 text-amber-400 animate-pulse" />,
+  },
+];
+
 export const ProcessingHUD: React.FC<ProcessingHUDProps> = ({
   isLoading,
   activeQuestion,
   activeLocationName,
   isVoiceActive,
+  isCurrentView,
+  screenshotSizeKb,
 }) => {
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
+
+  const isScreenMode = Boolean(
+    isCurrentView ||
+    (activeQuestion && (
+      activeQuestion.toLowerCase().includes('screen') ||
+      activeQuestion.toLowerCase().includes('current view') ||
+      activeQuestion.toLowerCase().includes('this view') ||
+      activeQuestion.toLowerCase().includes('building') ||
+      activeQuestion.toLowerCase().includes('court') ||
+      activeQuestion.toLowerCase().includes('what can you see') ||
+      activeQuestion.toLowerCase().includes('can you see') ||
+      activeQuestion.toLowerCase().includes('detail') ||
+      activeQuestion.toLowerCase().includes('visible') ||
+      activeQuestion.toLowerCase().includes('analys') ||
+      activeQuestion.toLowerCase().includes('image')
+    ))
+  );
+
+  const steps = isScreenMode ? CURRENT_VIEW_STEPS : NAVIGATION_STEPS;
 
   useEffect(() => {
     if (!isLoading) {
@@ -68,15 +119,15 @@ export const ProcessingHUD: React.FC<ProcessingHUDProps> = ({
 
     // Progress through visual steps realistically during backend computation
     const interval = setInterval(() => {
-      setCurrentStepIndex((prev) => (prev < PROCESSING_STEPS.length - 1 ? prev + 1 : prev));
-    }, 480);
+      setCurrentStepIndex((prev) => (prev < steps.length - 1 ? prev + 1 : prev));
+    }, isScreenMode ? 350 : 480);
 
     return () => clearInterval(interval);
-  }, [isLoading]);
+  }, [isLoading, steps.length, isScreenMode]);
 
   if (!isLoading) return null;
 
-  const currentStep = PROCESSING_STEPS[currentStepIndex];
+  const currentStep = steps[currentStepIndex] || steps[0];
 
   return (
     <div className="w-full rounded-2xl overflow-hidden glass-panel-glow border-2 border-cyan-500/60 shadow-2xl shadow-cyan-950/60 p-4 bg-slate-950/95 backdrop-blur-xl animate-fade-in relative z-30">
@@ -89,13 +140,19 @@ export const ProcessingHUD: React.FC<ProcessingHUDProps> = ({
           </div>
 
           <div className="flex flex-col">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span className="text-xs font-bold text-slate-100 uppercase tracking-wider font-mono">
-                COSMOCLIP Live Engine Active
+                {isScreenMode ? 'Screen View VLM Active' : 'COSMOCLIP Live Engine Active'}
               </span>
               <span className="px-1.5 py-0.2 text-[9px] font-mono bg-cyan-950 text-cyan-300 border border-cyan-700/60 rounded animate-pulse">
                 PROCESSING TURN
               </span>
+              {isScreenMode && (
+                <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-emerald-950/80 border border-emerald-500/60 text-emerald-300 text-[10px] font-mono shadow-[0_0_10px_rgba(16,185,129,0.3)] animate-pulse">
+                  <Camera className="w-3 h-3 text-emerald-400" />
+                  <span>📸 SCREENSHOT CAPTURED ({screenshotSizeKb || 74} KB) — ANALYZING VIEWPORT</span>
+                </div>
+              )}
             </div>
             <span className="text-[11px] text-slate-400 truncate max-w-md">
               {activeQuestion ? `"${activeQuestion}"` : `Analyzing remote sensing scene for ${activeLocationName || 'target region'}`}
@@ -105,7 +162,7 @@ export const ProcessingHUD: React.FC<ProcessingHUDProps> = ({
 
         {/* Live Step Tracker Pills */}
         <div className="flex items-center gap-1.5 flex-wrap">
-          {PROCESSING_STEPS.map((step, idx) => {
+          {steps.map((step, idx) => {
             const isDone = idx < currentStepIndex;
             const isCurrent = idx === currentStepIndex;
             return (
@@ -142,7 +199,7 @@ export const ProcessingHUD: React.FC<ProcessingHUDProps> = ({
             <span className="text-slate-300 font-normal text-[11px]">{currentStep.desc}</span>
           </div>
           <span className="text-[10px] font-mono text-cyan-400 font-semibold">
-            {Math.round(((currentStepIndex + 1) / PROCESSING_STEPS.length) * 100)}% Complete
+            {Math.round(((currentStepIndex + 1) / steps.length) * 100)}% Complete
           </span>
         </div>
 
@@ -150,7 +207,7 @@ export const ProcessingHUD: React.FC<ProcessingHUDProps> = ({
         <div className="relative w-full h-1.5 bg-slate-900 rounded-full overflow-hidden border border-slate-800">
           <div
             className="absolute top-0 bottom-0 left-0 bg-gradient-to-r from-cyan-500 via-blue-500 to-emerald-400 rounded-full transition-all duration-700 shadow-[0_0_10px_rgba(6,182,212,0.8)]"
-            style={{ width: `${((currentStepIndex + 1) / PROCESSING_STEPS.length) * 100}%` }}
+            style={{ width: `${((currentStepIndex + 1) / steps.length) * 100}%` }}
           />
         </div>
       </div>

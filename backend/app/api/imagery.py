@@ -34,6 +34,8 @@ async def geocode_location(req: GeocodeRequest):
     and returns exact bounding coordinates for the map.
     """
     geo = GeocoderService.geocode(req.query)
+    if not geo:
+        raise HTTPException(status_code=404, detail=f"Location '{req.query}' could not be resolved.")
     scene = ImageryService.get_multimodal_scene(geo["name"], bbox=geo["bbox"], zoom=geo.get("zoom", 14))
     return GeocodeResponse(
         name=geo["name"],

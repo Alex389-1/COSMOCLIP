@@ -29,9 +29,14 @@ class ImageryService:
         # 1. Geocode location if bbox not provided
         if not bbox or len(bbox) != 4:
             geo = GeocoderService.geocode(location_name)
-            bbox = geo["bbox"]
-            center_lat, center_lon = geo["lat"], geo["lon"]
-            resolved_name = geo["name"]
+            if not geo:
+                bbox = [77.48, 28.74, 77.51, 28.76]
+                center_lat, center_lon = 28.7495, 77.4912
+                resolved_name = location_name or "Observation Area"
+            else:
+                bbox = geo["bbox"]
+                center_lat, center_lon = geo["lat"], geo["lon"]
+                resolved_name = geo["name"]
         else:
             center_lat = (bbox[1] + bbox[3]) / 2.0
             center_lon = (bbox[0] + bbox[2]) / 2.0

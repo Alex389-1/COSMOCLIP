@@ -61,13 +61,16 @@ export async function submitVQAQuery(payload: {
   scene_id?: string;
   location_name?: string;
   image_data_url?: string;
+  image_base64?: string;
   bbox?: [number, number, number, number];
   viewport_bbox?: [number, number, number, number];
   viewport_zoom?: number;
+  viewport_captured_at?: number;
   enable_grounding?: boolean;
   enable_voice_response?: boolean;
   session_id?: string;
 }): Promise<QueryResponse> {
+
   const res = await fetch(`${API_BASE}/query`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -76,6 +79,22 @@ export async function submitVQAQuery(payload: {
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Query failed' }));
     throw new Error(err.detail || 'Failed to execute query');
+  }
+  return res.json();
+}
+
+export async function submitCurrentViewQuery(payload: {
+  question: string;
+  image_base64: string;
+}): Promise<QueryResponse> {
+  const res = await fetch(`${API_BASE}/query/current-view`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Current-view query failed' }));
+    throw new Error(err.detail || 'Failed to execute current-view query');
   }
   return res.json();
 }

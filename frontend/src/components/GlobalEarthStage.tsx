@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import L from 'leaflet';
+import { setActiveMap } from '../utils/captureView';
 import {
   Globe2,
   Sparkles,
@@ -104,13 +105,13 @@ export const GlobalEarthStage: React.FC<GlobalEarthStageProps> = ({
     // High-Definition ArcGIS Global World Imagery Layer
     L.tileLayer(
       'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-      { maxZoom: 18 }
+      { maxZoom: 18, crossOrigin: 'anonymous' }
     ).addTo(map);
 
     // Reference boundaries & coastlines
     L.tileLayer(
       'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
-      { maxZoom: 18, opacity: 0.6 }
+      { maxZoom: 18, opacity: 0.6, crossOrigin: 'anonymous' }
     ).addTo(map);
 
     // Place Glowing Target Pins for Benchmark Regions
@@ -134,6 +135,7 @@ export const GlobalEarthStage: React.FC<GlobalEarthStageProps> = ({
     });
 
     mapInstanceRef.current = map;
+    setActiveMap(map);
 
     const timer = setTimeout(() => {
       map.invalidateSize();
@@ -141,6 +143,7 @@ export const GlobalEarthStage: React.FC<GlobalEarthStageProps> = ({
 
     return () => {
       clearTimeout(timer);
+      setActiveMap(null);
       map.remove();
       mapInstanceRef.current = null;
     };

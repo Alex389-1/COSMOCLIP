@@ -53,11 +53,17 @@ def build_speech_config(voice_name: str) -> types.SpeechConfig:
 
 
 def build_thinking_config(thinking_level_str: str) -> Optional[types.ThinkingConfig]:
-    """Builds thinking configuration if enabled, or None for zero-latency instant voice."""
-    if thinking_level_str.upper() in ("HIGH", "MEDIUM"):
-        thinking_level = getattr(types.ThinkingLevel, thinking_level_str.upper(), types.ThinkingLevel.LOW)
-        return types.ThinkingConfig(thinking_level=thinking_level)
-    return None
+    """Builds thinking configuration for the Gemini Live model.
+
+    MINIMAL/LOW both map to ThinkingLevel.LOW for lowest latency voice responses.
+    None is returned only when thinking is explicitly disabled.
+    """
+    level = thinking_level_str.upper() if thinking_level_str else "LOW"
+    # Map MINIMAL -> LOW to avoid None ThinkingConfig which can cause empty model turns
+    if level in ("MINIMAL", "NONE", "OFF", "DISABLED"):
+        return types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW)
+    gemini_level = getattr(types.ThinkingLevel, level, types.ThinkingLevel.LOW)
+    return types.ThinkingConfig(thinking_level=gemini_level)
 
 
 def build_connect_config(
@@ -93,9 +99,12 @@ def build_connect_config(
         tools=active_tools,
         system_instruction=types.Content(parts=[types.Part.from_text(text=instruction)]),
         realtime_input_config=types.RealtimeInputConfig(automatic_activity_detection=vad_config),
+        # Context window compression: use a high trigger threshold (32k tokens) to avoid
+        # aggressive compression that causes Gemini to emit empty model turns (no text/tools),
+        # which results in "model output must contain either output text or tool calls" errors.
         context_window_compression=types.ContextWindowCompressionConfig(
-            trigger_tokens=16000,
-            sliding_window=types.SlidingWindow(target_tokens=8000),
+            trigger_tokens=32000,
+            sliding_window=types.SlidingWindow(target_tokens=24000),
         ),
         session_resumption=types.SessionResumptionConfig(handle=resumption_handle),
     )

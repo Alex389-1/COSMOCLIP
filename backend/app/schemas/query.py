@@ -33,12 +33,14 @@ class ConfidenceInfo(BaseModel):
 
 class QueryRequest(BaseModel):
     question: str = Field(..., description="Natural language or voice question about the satellite scene / location")
+    image_base64: Optional[str] = Field(None, description="Direct screenshot of active client map canvas (data:image/jpeg;base64,...)")
     scene_id: Optional[str] = Field(None, description="Optional scene identifier")
     location_name: Optional[str] = Field(None, description="Optional explicit location name")
     image_data_url: Optional[str] = Field(None, description="Optional base64 data URL for direct image upload")
     bbox: Optional[List[float]] = Field(None, description="Optional AOI crop coordinates [min_lon, min_lat, max_lon, max_lat]")
-    viewport_bbox: Optional[List[float]] = Field(None, description="Live Leaflet map viewport bounds [west, south, east, north]")
-    viewport_zoom: Optional[int] = Field(None, description="Live Leaflet map zoom level")
+    viewport_bbox: Optional[List[float]] = Field(None, description="[Deprecated] Live Leaflet map viewport bounds")
+    viewport_zoom: Optional[int] = Field(None, description="[Deprecated] Live Leaflet map zoom level")
+    viewport_captured_at: Optional[float] = Field(None, description="[Deprecated] ms epoch when viewport was captured")
     enable_grounding: bool = Field(default=True, description="Request spatial bounding box / evidence localization")
     enable_voice_response: bool = Field(default=True, description="Request spoken voice response")
     session_id: Optional[str] = Field(default="default_session", description="Session identifier")
@@ -80,3 +82,8 @@ class QueryResponse(BaseModel):
     model: ModelMetadata = Field(default_factory=ModelMetadata, description="Model and adapter metadata")
     trace: List[TraceStep] = Field(default_factory=list, description="Full LangGraph execution trace")
     audio_base64: Optional[str] = Field(None, description="Optional base64 synthesized audio")
+    # --- Active-Viewport Analysis fields ---
+    query_intent: Optional[str] = Field(None, description="Spatial intent: 'navigation' | 'current_view' | 'viewport_bound' | 'followup'")
+    query_type: Optional[str] = Field(None, description="Dispatch type: 'navigation' | 'current_view'")
+    image_gsd_m: Optional[float] = Field(None, description="Ground sample distance of imagery used (metres per pixel)")
+    should_recenter_map: Optional[bool] = Field(None, description="True if map should pan/zoom to location_meta; False if viewport must stay anchored")
