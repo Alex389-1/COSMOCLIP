@@ -31,6 +31,15 @@ data/cache/*
 !data/cache/.gitkeep
 voice_speech/data/sessions/
 
+# Backend session satellite image storage (runtime generated, not source)
+voice_speech/data/sessions/**/*.png
+voice_speech/data/sessions/**/*.jpg
+voice_speech/data/sessions/**/*.jpeg
+backend/data/sessions/
+backend/data/sessions/**/*.png
+backend/data/sessions/**/*.jpg
+backend/data/sessions/**/*.jpeg
+
 # OS & IDE Files
 .DS_Store
 Thumbs.db
